@@ -1,0 +1,2 @@
+# Telegram_session_Adblock
+Telegram群组式会话传声机器人
