@@ -98,23 +98,3 @@ func (r *Runtime) SessionAction(ctx context.Context, topic store.TopicRow, actio
 	r.publishSession(ctx, topic.ID)
 	return nil
 }
-
-// ValidateTokenAndGroup 是给「测试连接」向导用的便捷入口。
-//
-// 之所以放在 Runtime 上而不是 api 包里直接调 tgapi：这样面板的校验
-// 与运行时用的是同一套错误翻译，管理员在两个地方看到的措辞一致。
-func (r *Runtime) ValidateTokenAndGroup(ctx context.Context, chatID int64) (bool, []string, error) {
-	check, err := r.api.GetChat(ctx, chatID)
-	if err != nil {
-		return false, nil, fmt.Errorf("读取群信息失败：%s", describeTelegramError(err))
-	}
-
-	problems := make([]string, 0, 3)
-	if !check.IsForum {
-		problems = append(problems, "该群没有开启「话题（Topics）」功能")
-	}
-	if check.Title == "" {
-		problems = append(problems, "群名称为空，可能不是有效的超级群")
-	}
-	return len(problems) == 0, problems, nil
-}

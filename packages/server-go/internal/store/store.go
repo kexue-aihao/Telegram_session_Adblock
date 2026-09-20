@@ -201,6 +201,25 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.write.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("应用表结构: %w", err)
 	}
+
+	// ── 增量列 ────────────────────────────────────────────────
+	//
+	// schema.sql 里的 CREATE TABLE IF NOT EXISTS 对**已存在**的表
+	// 完全不起作用，所以给老库加列必须单独走 ALTER。
+	// 早于这一版的库（v0.2.x 部署的）就属于这种情况。
+	//
+	// addColumnIfMissing 内部先查 PRAGMA table_info 再决定是否 ALTER，
+	// 所以重复执行是安全的。
+	incremental := []struct{ table, column, definition string }{
+		{"bots", "is_manager", "INTEGER NOT NULL DEFAULT 0"},
+		{"bots", "last_relay_error", "TEXT"},
+		{"bots", "last_relay_error_at", "INTEGER"},
+	}
+	for _, col := range incremental {
+		if err := s.addColumnIfMissing(ctx, col.table, col.column, col.definition); err != nil {
+			return fmt.Errorf("升级表结构: %w", err)
+		}
+	}
 	return nil
 }
 

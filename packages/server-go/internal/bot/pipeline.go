@@ -81,6 +81,7 @@ func (r *Runtime) processUserMessage(ctx context.Context, messages []*tgapi.Mess
 		topic, _, err = r.ensureTopic(ctx, settings, contact)
 		if err != nil {
 			r.log.Error("创建话题失败", "contactId", contact.ID, "err", err)
+			r.setRelayError(ctx, err)
 			return
 		}
 
@@ -109,6 +110,7 @@ func (r *Runtime) processUserMessage(ctx context.Context, messages []*tgapi.Mess
 		topic, _, err = r.ensureTopic(ctx, settings, contact)
 		if err != nil {
 			r.log.Error("创建话题失败", "contactId", contact.ID, "err", err)
+			r.setRelayError(ctx, err)
 			return
 		}
 	}
@@ -118,6 +120,10 @@ func (r *Runtime) processUserMessage(ctx context.Context, messages []*tgapi.Mess
 	if relayErr := r.relayToTopic(ctx, topic, messages); relayErr != nil {
 		r.log.Error("转发失败", "topicId", topic.ID, "err", relayErr)
 		r.notifyRelayFailure(ctx, topic, relayErr)
+		r.setRelayError(ctx, relayErr)
+	} else {
+		// 成功才清标记：错误表示的是「当前状态」而不是「历史事件」
+		r.clearRelayError(ctx)
 	}
 
 	_ = r.db.TouchTopic(ctx, topic.ID)
@@ -623,4 +629,40 @@ func truncate(s string, max int) string {
 type muteState struct {
 	mu sync.Mutex
 	m  map[int64]*int64
+}
+
+// setRelayError 把中继失败的原因记到机器人行上，供面板显示。
+//
+// 这个字段存在的唯一理由：中继失败原本只写进容器日志，面板上完全看不出来 ——
+// 管理员看到的现象是「用户发了消息，但会话列表里什么都没有」，
+// 而真正的原因（没绑群、机器人不是管理员、群没开 Topics）一条都看不到。
+// 他只能去翻容器日志，而很多人根本不知道要去看那里。
+func (r *Runtime) setRelayError(ctx context.Context, cause error) {
+	msg := cause.Error()
+	runes := []rune(msg)
+	if len(runes) > 300 {
+		msg = string(runes[:300]) + "…"
+	}
+
+	// 用 WithoutCancel：中继失败时 ctx 可能已经被取消（handler 超时），
+	// 而「记下失败原因」这件事必须完成 —— 否则面板上永远看不到这条线索。
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+
+	if err := r.db.SetRelayError(writeCtx, r.botID, msg); err != nil {
+		r.log.Warn("记录中继错误失败", "err", err)
+	}
+}
+
+// clearRelayError 在一次成功中继后清掉错误标记。
+//
+// 只有成功才清 —— 错误标记表示的是「当前状态」，不是「历史事件」。
+// 留着一条早就修好的错误会让人一直以为它是坏的。
+func (r *Runtime) clearRelayError(ctx context.Context) {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+
+	if err := r.db.ClearRelayError(writeCtx, r.botID); err != nil {
+		r.log.Warn("清除中继错误失败", "err", err)
+	}
 }

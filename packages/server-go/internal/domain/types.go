@@ -155,11 +155,17 @@ type Bot struct {
 	AdminGroupID    *int64  `json:"adminGroupId"`
 	AdminGroupTitle *string `json:"adminGroupTitle"`
 	IsEnabled       bool    `json:"isEnabled"`
-	HealthStatus    string  `json:"healthStatus"`
-	LastError       *string `json:"lastError"`
-	LastPolledAt    *int64  `json:"lastPolledAt"`
-	CreatedAt       int64   `json:"createdAt"`
-	UpdatedAt       int64   `json:"updatedAt"`
+	// 管理机器人：管理员可直接在 Telegram 里与它对话，增删托管其他机器人
+	IsManager bool `json:"isManager"`
+	// 最近一次中继失败的原因。面板据此回答「为什么没有会话」——
+	// 否则这类失败只在容器日志里可见。
+	LastRelayError   *string `json:"lastRelayError"`
+	LastRelayErrorAt *int64  `json:"lastRelayErrorAt"`
+	HealthStatus     string  `json:"healthStatus"`
+	LastError        *string `json:"lastError"`
+	LastPolledAt     *int64  `json:"lastPolledAt"`
+	CreatedAt        int64   `json:"createdAt"`
+	UpdatedAt        int64   `json:"updatedAt"`
 }
 
 // BotValidation 是 token 校验结果（向导第一步）。

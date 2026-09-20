@@ -129,6 +129,16 @@ func (r *Runtime) ensureTopic(
 	settings store.BotSettings,
 	contact store.ContactRow,
 ) (store.TopicRow, bool, error) {
+	// 没绑管理群就别往下走了。
+	//
+	// 不加这个判断的话，会拿 chat_id=0 去调 createForumTopic，
+	// Telegram 回一句「Bad Request: chat not found」—— 那句话完全不提
+	// 「你还没绑群」，是本项目最容易让人排查半天的一种报错。
+	if r.adminGroupID == 0 {
+		return store.TopicRow{}, false, errors.New(
+			"尚未绑定管理群，用户的消息无法中继进话题。请在面板的「机器人」页绑定")
+	}
+
 	existing, err := r.db.GetTopicByContact(ctx, r.botID, contact.ID)
 	if err == nil {
 		switch existing.Status {
@@ -157,7 +167,13 @@ func (r *Runtime) ensureTopic(
 
 	created, err := r.api.CreateForumTopic(ctx, r.adminGroupID, title, iconColor)
 	if err != nil {
-		return store.TopicRow{}, false, fmt.Errorf("创建话题: %w", err)
+		// 把 Telegram 的英文原文换成人能照着修的说法。
+		//
+		// 这一步失败的三个原因占了绝大多数：机器人不是群管理员、
+		// 群没开 Topics、或者绑错了群 ID。原文一个都不提。
+		return store.TopicRow{}, false, fmt.Errorf(
+			"创建话题失败：%s\n请依次检查：① 机器人是管理群的管理员 ② 该群开启了「话题（Topics）」③ 绑定的群 ID 正确",
+			DescribeTelegramError(err))
 	}
 
 	topic, err := r.db.CreateTopic(ctx, r.botID, contact.ID, created.MessageThreadID, title, iconColor)
@@ -353,6 +369,52 @@ func (r *Runtime) sendToUser(ctx context.Context, tgUserID int64, text string) (
 
 	// 先降级重试一次纯文本
 	msg, retryErr := r.api.SendMessage(ctx, tgUserID, text, tgapi.SendMessageOptions{
+		DisableLinkPreview: true,
+	})
+	if retryErr == nil {
+		return true, msgID(msg)
+	}
+
+	var apiErr *tgapi.APIError
+	if errors.As(retryErr, &apiErr) && apiErr.IsBlockedByUser() {
+		if err := r.db.SetContactUnreachable(ctx, r.botID, tgUserID, true); err != nil {
+			r.log.Warn("标记联系人不可达失败", "err", err)
+		}
+		return false, 0
+	}
+
+	r.log.Error("发送私聊消息失败", "tgUserId", tgUserID, "err", retryErr)
+	return false, 0
+}
+
+// sendToUserKeyboard 与 sendToUser 相同，但带内联键盘。
+//
+// 单独一个方法而不是给 sendToUser 加可选参数：Go 没有默认参数，
+// 而"加一个 *InlineKeyboardMarkup 参数"会让既有的十几处调用点
+// 全部要传 nil —— 那种改动没有任何信息量。
+func (r *Runtime) sendToUserKeyboard(
+	ctx context.Context,
+	tgUserID int64,
+	text string,
+	keyboard *tgapi.InlineKeyboardMarkup,
+) (sent bool, messageID int64) {
+	if text == "" {
+		return false, 0
+	}
+
+	msg, err := r.api.SendMessage(ctx, tgUserID, text, tgapi.SendMessageOptions{
+		Markdown:           true,
+		Keyboard:           keyboard,
+		DisableLinkPreview: true,
+	})
+	if err == nil {
+		return true, msgID(msg)
+	}
+
+	// 与 sendToUser 同样的降级：管理员自己配的文案里可能有个没转义的
+	// 星号，那不该让整条消息发不出去。
+	msg, retryErr := r.api.SendMessage(ctx, tgUserID, text, tgapi.SendMessageOptions{
+		Keyboard:           keyboard,
 		DisableLinkPreview: true,
 	})
 	if retryErr == nil {

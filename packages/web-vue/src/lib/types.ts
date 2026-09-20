@@ -16,6 +16,11 @@ export interface Bot {
   adminGroupId: number | null;
   adminGroupTitle: string | null;
   isEnabled: boolean;
+  /** 管理机器人：管理员可在 Telegram 里直接与它对话来托管其他机器人 */
+  isManager: boolean;
+  /** 最近一次中继失败的原因。没有它，管理员只能去翻容器日志才知道为什么没有会话。 */
+  lastRelayError: string | null;
+  lastRelayErrorAt: number | null;
   healthStatus: 'unknown' | 'starting' | 'online' | 'error' | 'stopped';
   lastError: string | null;
   lastPolledAt: number | null;
@@ -91,6 +96,8 @@ export interface GlobalSettings {
   auditRetentionDays: number | null;
   autoDisableOnRegexTimeout: boolean;
   regexTimeoutMs: number;
+  /** 允许使用管理机器人的 Telegram 用户 ID。0 = 未配置，此时所有管理命令一律拒绝。 */
+  adminTgUserId: number;
 }
 
 export interface AdRule {

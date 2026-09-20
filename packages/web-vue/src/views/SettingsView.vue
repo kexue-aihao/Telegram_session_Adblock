@@ -187,6 +187,49 @@ async function changePassword() {
         </div>
 
         <div
+          class="space-y-3 rounded-xl border border-[var(--color-line-faint)] bg-[var(--color-bg-2)] px-3.5 py-3"
+        >
+          <div>
+            <p class="text-xs font-medium">管理机器人的管理员</p>
+            <p class="mt-0.5 text-2xs leading-relaxed text-[var(--color-ink-subtle)]">
+              填<strong>你自己的</strong> Telegram 数字 ID。只有这个 ID 能用管理命令 ——
+              在 Telegram 里私聊被标记为「管理机器人」的那个机器人，
+              发 <code class="font-mono">/start</code> 就能打开菜单，
+              直接在 Telegram 里增删托管其他机器人。
+            </p>
+          </div>
+
+          <AppField
+            label="管理员 Telegram 用户 ID"
+            hint="留 0 或留空 = 禁用管理命令"
+          >
+            <AppInput
+              :model-value="globalDraft.adminTgUserId || ''"
+              inputmode="numeric"
+              placeholder="例如 123456789"
+              class="font-mono text-xs"
+              @update:model-value="
+                globalDraft.adminTgUserId = $event ? Number.parseInt($event, 10) || 0 : 0
+              "
+            />
+          </AppField>
+
+          <p
+            class="flex items-start gap-1.5 rounded-lg bg-[var(--color-warn-soft)] px-2.5 py-2 text-2xs leading-relaxed text-[var(--color-warn)]"
+          >
+            <AppIcon name="warning" :size="14" class="mt-px shrink-0" />
+            <span>
+              这是一条<strong>安全边界</strong>，不是偏好设置。管理机器人在 Telegram
+              上是公开可私聊的 —— 谁搜到都能发消息。留空时所有管理命令一律拒绝，
+              不会把控制权交给第一个找到它的人。
+              <br />
+              不知道自己的 ID？把任意一条消息转发给
+              <code class="font-mono">@userinfobot</code> 即可看到。
+            </span>
+          </p>
+        </div>
+
+        <div
           class="flex items-start justify-between gap-3 rounded-xl border border-[var(--color-line-faint)] bg-[var(--color-bg-2)] px-3.5 py-3"
         >
           <div class="min-w-0">

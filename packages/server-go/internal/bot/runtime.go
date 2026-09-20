@@ -54,6 +54,17 @@ type Runtime struct {
 	albumMu sync.Mutex
 	albums  map[string]*albumBuffer
 
+	// 管理机器人相关
+	//
+	// manager 是指回 Manager 的引用。需要它是因为管理命令要能
+	// 开通/删除别的机器人，而那是 Manager 的职责 —— Runtime 自己
+	// 做不了（它只持有自己那一个 api 客户端）。
+	manager   *Manager
+	isManager bool
+	// 添加机器人的对话状态，key 是管理员的私聊 chat id
+	mgrMu     sync.Mutex
+	mgrStates map[int64]*addFlow
+
 	cancel  context.CancelFunc
 	stopped chan struct{}
 	running bool
@@ -105,6 +116,8 @@ func NewRuntime(row store.BotRow, masterKey []byte, deps Deps) (*Runtime, error)
 		floodWindow:   make(map[int64][]time.Time),
 		mutedNotified: make(map[int64]*int64),
 		albums:        make(map[string]*albumBuffer),
+		isManager:     row.IsManager,
+		mgrStates:     make(map[int64]*addFlow),
 	}, nil
 }
 
@@ -133,7 +146,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 	// token 可能是几周前存的，期间用户可能已经在 BotFather 那里重置过。
 	me, err := r.api.GetMe(ctx)
 	if err != nil {
-		msg := describeTelegramError(err)
+		msg := DescribeTelegramError(err)
 		_ = r.db.UpdateBotHealth(ctx, r.botID, domain.HealthError, &msg)
 		r.publishStatus()
 		return fmt.Errorf("机器人启动失败: %s", msg)
@@ -350,6 +363,15 @@ func (r *Runtime) handleMessage(ctx context.Context, m *tgapi.Message) {
 
 // handlePrivate 处理私聊消息。
 func (r *Runtime) handlePrivate(ctx context.Context, m *tgapi.Message) {
+	// 管理机器人优先：管理员的私聊走管理命令，不进中继管线。
+	//
+	// 放在最前面而不是塞进下面的 switch，是因为管理机器人的语义与
+	// 中继机器人**完全不同** —— 它不是客服入口，而是一个控制台。
+	// 混在一起会让「管理员发的测试消息突然进了话题」这种困惑变得可能。
+	if r.handleManagerPrivate(ctx, m) {
+		return
+	}
+
 	// 命令分流。注意 /start 之外以 / 开头的文本**仍然走中继** ——
 	// 用户发 "/price"、"/订单123" 这类内容非常常见，
 	// 一刀切当成「未知命令」忽略掉，用户会觉得机器人坏了。
@@ -507,6 +529,12 @@ func (r *Runtime) handleCallback(ctx context.Context, q *tgapi.CallbackQuery) {
 		_ = r.api.AnswerCallbackQuery(context.WithoutCancel(ctx), q.ID, "", false)
 	}()
 
+	// 管理机器人的按钮（mgr: 前缀）与话题按钮（tgs: 前缀）在同一台机器人上
+	// 也可能共存 —— 管理机器人自己也可能被绑了群。先分流再解析。
+	if r.handleManagerCallback(ctx, q) {
+		return
+	}
+
 	parsed, ok := parseCallback(q.Data)
 	if !ok {
 		return
@@ -611,42 +639,6 @@ func parseCommand(text string) string {
 		}
 	}
 	return text
-}
-
-// describeTelegramError 把 Telegram 的错误翻译成能指导操作的中文，
-// 而不是把英文原文抛给管理员。
-func describeTelegramError(err error) string {
-	var apiErr *tgapi.APIError
-	if errors.As(err, &apiErr) {
-		switch apiErr.Code {
-		case 401:
-			return "token 无效或已失效，请到 @BotFather 重新获取"
-		case 403:
-			return "机器人被限制，无法调用该接口"
-		case 409:
-			return "另一个进程正在用同一个 token 轮询"
-		}
-		return fmt.Sprintf("Telegram 返回错误 %d：%s", apiErr.Code, apiErr.Description)
-	}
-
-	msg := err.Error()
-	if contains(msg, "timeout") || contains(msg, "ETIMEDOUT") || contains(msg, "deadline exceeded") {
-		return "连接 Telegram 超时 —— 请检查服务器网络能否访问 api.telegram.org"
-	}
-	return msg
-}
-
-func contains(haystack, needle string) bool {
-	return len(needle) == 0 || indexOf(haystack, needle) >= 0
-}
-
-func indexOf(haystack, needle string) int {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return i
-		}
-	}
-	return -1
 }
 
 func derefInt(p *int64) int64 {

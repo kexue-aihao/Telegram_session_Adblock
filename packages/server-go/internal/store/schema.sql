@@ -20,6 +20,12 @@ CREATE TABLE IF NOT EXISTS bots (
     admin_group_id    INTEGER,
     admin_group_title TEXT,
     is_enabled        INTEGER NOT NULL DEFAULT 1,
+    -- 管理机器人：管理员可以在 Telegram 里直接与它对话来增删托管其他机器人
+    is_manager        INTEGER NOT NULL DEFAULT 0,
+    -- 最近一次中继失败的原因。面板据此显示「为什么没有会话」，
+    -- 否则这类失败只能在容器日志里看到。
+    last_relay_error  TEXT,
+    last_relay_error_at INTEGER,
     health_status     TEXT    NOT NULL DEFAULT 'unknown',
     last_error        TEXT,
     last_polled_at    INTEGER,

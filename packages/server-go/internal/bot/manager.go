@@ -125,6 +125,11 @@ func (m *Manager) Start(ctx context.Context, botID int64) error {
 		return err
 	}
 
+	// 回指：管理机器人需要开通/删除别的机器人，那是 Manager 的职责。
+	// 必须在 Start 之前设好 —— Start 会注册处理器，而处理器一收到
+	// 管理命令就会用到它。
+	runtime.manager = m
+
 	// 保留在 map 里，让面板能看到「这个机器人存在但起不来」以及具体原因。
 	// 删掉会让它在界面上凭空消失。
 	m.mu.Lock()

@@ -95,6 +95,16 @@ type GlobalSettings struct {
 	AuditRetentionDays        *int   `json:"auditRetentionDays"`
 	AutoDisableOnRegexTimeout bool   `json:"autoDisableOnRegexTimeout"`
 	RegexTimeoutMs            int    `json:"regexTimeoutMs"`
+
+	// AdminTgUserID 是允许使用管理机器人的 Telegram 用户 ID，0 表示未配置。
+	//
+	// **这是一条安全边界，不是偏好设置。** 管理机器人能增删托管其他机器人，
+	// 而它是可以被任何人私聊的 —— 没有这个白名单，任何找到它的人
+	// 都能往系统里塞机器人。
+	//
+	// 之所以不提供「第一个发 /start 的人自动成为管理员」这种便利逻辑：
+	// 那等于把系统的初始控制权交给第一个碰巧找到它的人。
+	AdminTgUserID int64 `json:"adminTgUserId"`
 }
 
 // DefaultGlobalSettings 返回默认全局设置。
@@ -104,6 +114,7 @@ func DefaultGlobalSettings() GlobalSettings {
 		AuditRetentionDays:        intPtr(180),
 		AutoDisableOnRegexTimeout: true,
 		RegexTimeoutMs:            50,
+		AdminTgUserID:             0,
 	}
 }
 

@@ -60,6 +60,8 @@ type createBotRequest struct {
 	Token        string `json:"token"`
 	AdminGroupID *int64 `json:"adminGroupId"`
 	Name         string `json:"name"`
+	// Manager 把它同时设为管理机器人（可以在 Telegram 里管理其他机器人）
+	Manager bool `json:"manager"`
 }
 
 func (s *Server) handleCreateBot(w http.ResponseWriter, r *http.Request) {
@@ -68,73 +70,32 @@ func (s *Server) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	req.Token = strings.TrimSpace(req.Token)
-	if !looksLikeBotToken(req.Token) {
-		writeError(w, http.StatusBadRequest, "这不像是 BotFather 签发的 token 格式")
-		return
-	}
-
-	validation, err := validateToken(r.Context(), req.Token)
-	if err != nil {
-		s.respondError(w, err)
-		return
-	}
-	if !validation.OK {
-		writeError(w, http.StatusBadRequest, derefOr(validation.Error, "token 校验失败"))
-		return
-	}
-
-	// 判重：同一个机器人加两次会让 Telegram 报 409，而且用户会以为是系统故障
-	if existing, err := s.db.GetBotByUsername(r.Context(), derefOr(validation.Username, "")); err == nil {
-		writeError(w, http.StatusConflict,
-			"机器人 @"+existing.Username+" 已经添加过了（id="+itoa(existing.ID)+"）")
-		return
-	}
-
-	sealed, err := secret.Seal(s.masterKey, req.Token)
-	if err != nil {
-		s.respondError(w, err)
-		return
-	}
-
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		name = derefOr(validation.Name, derefOr(validation.Username, "机器人"))
-	}
-
-	var groupTitle *string
-	if req.AdminGroupID != nil {
-		if check, err := checkGroup(r.Context(), req.Token, *req.AdminGroupID); err == nil {
-			groupTitle = check.Title
-		}
-	}
-
-	created, err := s.db.CreateBot(r.Context(), store.CreateBotInput{
-		Name:            name,
-		Username:        derefOr(validation.Username, ""),
-		Sealed:          sealed,
-		TokenMask:       secret.MaskToken(req.Token),
-		TelegramID:      validation.TelegramID,
-		AdminGroupID:    req.AdminGroupID,
-		AdminGroupTitle: groupTitle,
-		Settings:        store.DefaultBotSettings(0),
-	})
-	if err != nil {
-		s.respondError(w, err)
-		return
-	}
 
 	ac, _ := authFrom(r)
-	actor := ac.Username
-	s.writeAudit(r.Context(), r, domain.ActorAdmin, &actor, "bot.created", strPtr("bot"), strPtr(itoa(created.ID)),
-		map[string]any{"username": created.Username})
 
-	// 立即启动，管理员不用手动点一次「启用」
-	if created.AdminGroupID != nil {
-		if err := s.bots.Start(r.Context(), created.ID); err != nil {
-			s.log.Warn("机器人创建成功但启动失败", "botId", created.ID, "err", err)
-		}
+	// 整条开通流程（校验 token → 判重 → 加密入库 → 建默认设置 → 启动）
+	// 委托给 bot.Manager。管理机器人在 Telegram 里走的是**同一条**路径，
+	// 所以从两个入口加进来的机器人在库里的形态必然一致 ——
+	// 各写一份的话，权限判断这类最不该出错的地方迟早会漂移。
+	created, err := s.bots.Create(r.Context(), bot.CreateRequest{
+		Token:        req.Token,
+		AdminGroupID: req.AdminGroupID,
+		Name:         req.Name,
+		Manager:      req.Manager,
+		Actor:        ac.Username,
+	})
+	if err != nil {
+		// Create 已经把 Telegram 的错误翻译成人话了，直接透传
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
+
+	s.writeAudit(r.Context(), r, domain.ActorAdmin, &ac.Username, "bot.created",
+		strPtr("bot"), strPtr(itoa(created.ID)),
+		map[string]any{"username": created.Username, "manager": req.Manager})
+
+	// 回带一次 token 校验结果，让向导能显示 Privacy Mode 之类的提醒
+	validation, _ := bot.ValidateToken(r.Context(), req.Token)
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"bot":        created.ToDTO(),
@@ -151,6 +112,8 @@ type updateBotRequest struct {
 	AdminGroupID *int64  `json:"adminGroupId"`
 	IsEnabled    *bool   `json:"isEnabled"`
 	Token        *string `json:"token"`
+	// IsManager 把该机器人设为管理机器人（可在 Telegram 里直接管理其他机器人）
+	IsManager *bool `json:"isManager"`
 }
 
 func (s *Server) handleUpdateBot(w http.ResponseWriter, r *http.Request) {
@@ -180,7 +143,7 @@ func (s *Server) handleUpdateBot(w http.ResponseWriter, r *http.Request) {
 
 		// 顺带把群名问出来；缺权限也不该阻断保存
 		if token, err := secret.Open(s.masterKey, existing.Sealed()); err == nil {
-			if check, err := checkGroup(r.Context(), token, *req.AdminGroupID); err == nil {
+			if check, err := bot.CheckGroup(r.Context(), token, *req.AdminGroupID); err == nil {
 				fields.AdminGroupTitle = check.Title
 				if !check.OK {
 					s.log.Warn("绑定的管理群体检未通过", "botId", id, "problems", check.Problems)
@@ -192,11 +155,11 @@ func (s *Server) handleUpdateBot(w http.ResponseWriter, r *http.Request) {
 
 	if req.Token != nil {
 		token := strings.TrimSpace(*req.Token)
-		if !looksLikeBotToken(token) {
+		if !bot.LooksLikeBotToken(token) {
 			writeError(w, http.StatusBadRequest, "token 格式不正确")
 			return
 		}
-		validation, err := validateToken(r.Context(), token)
+		validation, err := bot.ValidateToken(r.Context(), token)
 		if err != nil {
 			s.respondError(w, err)
 			return
@@ -229,6 +192,27 @@ func (s *Server) handleUpdateBot(w http.ResponseWriter, r *http.Request) {
 			action = "bot.enabled"
 		}
 		s.writeAudit(r.Context(), r, domain.ActorAdmin, &actor, action, strPtr("bot"), strPtr(itoa(id)), nil)
+	}
+
+	// 管理机器人标记。**必须重启运行时** —— 它在构造时读一次 row.IsManager
+	// 并固化到 r.isManager，而那决定了私聊消息是走管理命令还是走中继。
+	// 不重启的话，面板上开关变了、实际路由没变，是最难排查的一类不一致。
+	if req.IsManager != nil {
+		if err := s.db.SetBotManager(r.Context(), id, *req.IsManager); err != nil {
+			s.respondError(w, err)
+			return
+		}
+		needsRestart = true
+
+		// 与 bot.enabled / bot.disabled 同一套命名：审计页是按 action
+		// 过滤的，「谁拿到了控制台权限」必须能被单独筛出来。
+		action := "bot.manager_disabled"
+		if *req.IsManager {
+			action = "bot.manager_enabled"
+		}
+		ac, _ := authFrom(r)
+		s.writeAudit(r.Context(), r, domain.ActorAdmin, &ac.Username, action,
+			strPtr("bot"), strPtr(itoa(id)), nil)
 	}
 
 	if err := s.db.UpdateBot(r.Context(), id, fields); err != nil {
@@ -334,7 +318,7 @@ func (s *Server) handleValidateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := validateToken(r.Context(), strings.TrimSpace(req.Token))
+	result, err := bot.ValidateToken(r.Context(), strings.TrimSpace(req.Token))
 	if err != nil {
 		s.respondError(w, err)
 		return
@@ -352,7 +336,7 @@ func (s *Server) handleCheckGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := checkGroup(r.Context(), strings.TrimSpace(req.Token), req.ChatID)
+	result, err := bot.CheckGroup(r.Context(), strings.TrimSpace(req.Token), req.ChatID)
 	if err != nil {
 		s.respondError(w, err)
 		return
@@ -383,7 +367,7 @@ func (s *Server) handleRecheckGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	check, err := checkGroup(r.Context(), token, *row.AdminGroupID)
+	check, err := bot.CheckGroup(r.Context(), token, *row.AdminGroupID)
 	if err != nil {
 		s.respondError(w, err)
 		return
@@ -772,31 +756,6 @@ func (s *Server) refreshContactSessions(ctx context.Context, contactID int64) {
 }
 
 // ────────────────────────────── 小工具 ──────────────────────────────
-
-// looksLikeBotToken 做一次廉价的前置校验，避免为明显错误的输入发一次网络请求。
-func looksLikeBotToken(token string) bool {
-	colon := strings.IndexByte(token, ':')
-	if colon < 6 || colon > 12 {
-		return false
-	}
-	for i := 0; i < colon; i++ {
-		if token[i] < '0' || token[i] > '9' {
-			return false
-		}
-	}
-	if len(token)-colon-1 < 30 {
-		return false
-	}
-	for _, ch := range token[colon+1:] {
-		switch {
-		case ch >= 'A' && ch <= 'Z', ch >= 'a' && ch <= 'z',
-			ch >= '0' && ch <= '9', ch == '_', ch == '-':
-		default:
-			return false
-		}
-	}
-	return true
-}
 
 func strPtr(s string) *string { return &s }
 

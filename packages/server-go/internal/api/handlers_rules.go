@@ -713,18 +713,19 @@ func applyGlobalSettingsPatch(current store.GlobalSettings, patch map[string]any
 		return current, err
 	}
 
+	// base 是 JSON 往返来的，数字全是 float64，而下面写进 patch 的数字会被
+	// normalizeJSON 转成 int64。不把两边统一成同一类型的话，一处「case int64」
+	// 就会把**没传的**字段当成传了个坏值 —— 表现为局部补丁永远失败。
+	for key, value := range base {
+		base[key] = normalizeJSON(value)
+	}
+
 	for key, value := range patch {
 		if _, known := base[key]; !known {
 			return current, errText("未知的设置项：" + key)
 		}
 		base[key] = normalizeJSON(value)
 	}
-
-	payload, err := toMap(base)
-	if err != nil {
-		return current, err
-	}
-	_ = payload
 
 	merged := current
 	if v, ok := base["timezone"].(string); ok && v != "" {
@@ -754,6 +755,25 @@ func applyGlobalSettingsPatch(current store.GlobalSettings, patch map[string]any
 			return current, errText("正则超时需要在 5 到 2000 毫秒之间")
 		}
 		merged.RegexTimeoutMs = ms
+	}
+
+	// 允许使用管理机器人的 Telegram 用户 ID。
+	//
+	// 这是**安全边界**而不是偏好设置：管理机器人在 Telegram 上公开可私聊，
+	// 而它能增删托管其他机器人。0 表示未配置 —— 此时所有管理命令一律拒绝，
+	// 不放行「第一个来的人」。
+	if v, ok := base["adminTgUserId"]; ok {
+		switch value := v.(type) {
+		case nil:
+			merged.AdminTgUserID = 0
+		case int64:
+			if value < 0 {
+				return current, errText("Telegram 用户 ID 是正数")
+			}
+			merged.AdminTgUserID = value
+		default:
+			return current, errText("adminTgUserId 必须是数字")
+		}
 	}
 
 	return merged, nil

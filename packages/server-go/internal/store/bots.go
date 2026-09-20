@@ -27,40 +27,46 @@ var ErrDuplicate = errors.New("记录已存在")
 // BotRow 是 bots 表的完整行。
 // 注意它含密文字段，**绝不能被直接序列化成 JSON** —— 对外一律走 ToDTO。
 type BotRow struct {
-	ID              int64
-	Name            string
-	Username        string
-	TokenCipher     string
-	TokenIV         string
-	TokenTag        string
-	TokenMask       string
-	TelegramID      *int64
-	AdminGroupID    *int64
-	AdminGroupTitle *string
-	IsEnabled       bool
-	HealthStatus    string
-	LastError       *string
-	LastPolledAt    *int64
-	CreatedAt       int64
-	UpdatedAt       int64
+	ID               int64
+	Name             string
+	Username         string
+	TokenCipher      string
+	TokenIV          string
+	TokenTag         string
+	TokenMask        string
+	TelegramID       *int64
+	AdminGroupID     *int64
+	AdminGroupTitle  *string
+	IsEnabled        bool
+	IsManager        bool
+	LastRelayError   *string
+	LastRelayErrorAt *int64
+	HealthStatus     string
+	LastError        *string
+	LastPolledAt     *int64
+	CreatedAt        int64
+	UpdatedAt        int64
 }
 
 // ToDTO 投影成对外结构。明文与密文 token 都不出现在结果里。
 func (b BotRow) ToDTO() domain.Bot {
 	return domain.Bot{
-		ID:              b.ID,
-		Name:            b.Name,
-		Username:        b.Username,
-		TokenMask:       b.TokenMask,
-		TelegramID:      b.TelegramID,
-		AdminGroupID:    b.AdminGroupID,
-		AdminGroupTitle: b.AdminGroupTitle,
-		IsEnabled:       b.IsEnabled,
-		HealthStatus:    b.HealthStatus,
-		LastError:       b.LastError,
-		LastPolledAt:    b.LastPolledAt,
-		CreatedAt:       b.CreatedAt,
-		UpdatedAt:       b.UpdatedAt,
+		ID:               b.ID,
+		Name:             b.Name,
+		Username:         b.Username,
+		TokenMask:        b.TokenMask,
+		TelegramID:       b.TelegramID,
+		AdminGroupID:     b.AdminGroupID,
+		AdminGroupTitle:  b.AdminGroupTitle,
+		IsEnabled:        b.IsEnabled,
+		IsManager:        b.IsManager,
+		LastRelayError:   b.LastRelayError,
+		LastRelayErrorAt: b.LastRelayErrorAt,
+		HealthStatus:     b.HealthStatus,
+		LastError:        b.LastError,
+		LastPolledAt:     b.LastPolledAt,
+		CreatedAt:        b.CreatedAt,
+		UpdatedAt:        b.UpdatedAt,
 	}
 }
 
@@ -70,18 +76,21 @@ func (b BotRow) Sealed() secret.Sealed {
 }
 
 const botColumns = `id, name, username, token_cipher, token_iv, token_tag, token_mask,
-	telegram_id, admin_group_id, admin_group_title, is_enabled, health_status,
+	telegram_id, admin_group_id, admin_group_title, is_enabled, is_manager,
+	last_relay_error, last_relay_error_at, health_status,
 	last_error, last_polled_at, created_at, updated_at`
 
 func scanBot(row interface{ Scan(...any) error }) (BotRow, error) {
 	var b BotRow
-	var isEnabled int
+	var isEnabled, isManager int
 	err := row.Scan(
 		&b.ID, &b.Name, &b.Username, &b.TokenCipher, &b.TokenIV, &b.TokenTag, &b.TokenMask,
-		&b.TelegramID, &b.AdminGroupID, &b.AdminGroupTitle, &isEnabled, &b.HealthStatus,
+		&b.TelegramID, &b.AdminGroupID, &b.AdminGroupTitle, &isEnabled, &isManager,
+		&b.LastRelayError, &b.LastRelayErrorAt, &b.HealthStatus,
 		&b.LastError, &b.LastPolledAt, &b.CreatedAt, &b.UpdatedAt,
 	)
 	b.IsEnabled = isEnabled == 1
+	b.IsManager = isManager == 1
 	return b, err
 }
 
@@ -500,4 +509,43 @@ func joinComma(parts []string) string {
 		out += p
 	}
 	return out
+}
+
+// ────────────────────────────── 管理机器人 ──────────────────────────────
+
+// SetBotManager 把某个机器人设为（或取消）管理机器人。
+//
+// 刻意**不**强制全局唯一：多设几个不会造成安全问题（权限判断在
+// 运行时的 adminTgUserID 上），而「同时只能有一个」需要在设置里
+// 做一次事务性的清除，收益不抵复杂度。
+// 界面上会提示「当前的管理机器人是哪个」，语义足够清楚。
+func (s *Store) SetBotManager(ctx context.Context, id int64, isManager bool) error {
+	_, err := s.write.ExecContext(ctx,
+		`UPDATE bots SET is_manager = ?, updated_at = ? WHERE id = ?`,
+		boolToInt(isManager), time.Now().UnixMilli(), id)
+	return err
+}
+
+// SetRelayError 记录最近一次中继失败的原因。
+//
+// 存在的意义：中继失败原本只写进容器日志，面板上完全看不出来 ——
+// 管理员看到的现象是「用户发了消息但会话列表里什么都没有」，
+// 而真正的原因（没绑群、机器人不是管理员、群没开 Topics）
+// 一条都看不到。
+func (s *Store) SetRelayError(ctx context.Context, botID int64, reason string) error {
+	_, err := s.write.ExecContext(ctx,
+		`UPDATE bots SET last_relay_error = ?, last_relay_error_at = ? WHERE id = ?`,
+		reason, time.Now().UnixMilli(), botID)
+	return err
+}
+
+// ClearRelayError 在一次成功中继后清掉错误标记。
+//
+// 只有成功才清：失败是「当前状态」，不是「历史事件」，
+// 留着一条早就修好的错误会让人一直以为是坏的。
+func (s *Store) ClearRelayError(ctx context.Context, botID int64) error {
+	_, err := s.write.ExecContext(ctx,
+		`UPDATE bots SET last_relay_error = NULL, last_relay_error_at = NULL
+		 WHERE id = ? AND last_relay_error IS NOT NULL`, botID)
+	return err
 }

@@ -76,6 +76,33 @@ async function reload(bot: Bot) {
   }
 }
 
+/**
+ * 切换「管理机器人」。
+ *
+ * 开启后这个机器人会接受管理命令：管理员私聊它，发 /start 就有菜单，
+ * 可以直接在 Telegram 里增删托管其他机器人。
+ *
+ * 前提是「设置」页里填了管理员的 Telegram 用户 ID —— 没填的话
+ * 所有管理命令都会被拒绝（这是一条安全边界，不是可选的便利项）。
+ */
+async function toggleManager(bot: Bot) {
+  const next = !bot.isManager;
+  checkingId.value = bot.id;
+  try {
+    await api.patch(`/api/bots/${bot.id}`, { isManager: next });
+    if (next) {
+      toast.success('已设为管理机器人', '在 Telegram 里私聊它并发送 /start');
+    } else {
+      toast.success('已取消管理机器人');
+    }
+    void bots.reload();
+  } catch (err) {
+    toast.error('操作失败', err instanceof ApiError ? err.message : '未知错误');
+  } finally {
+    checkingId.value = null;
+  }
+}
+
 async function confirmDelete() {
   const target = deleteTarget.value;
   if (!target) return;
@@ -213,6 +240,27 @@ async function confirmDelete() {
           {{ bot.lastError }}
         </p>
 
+        <!--
+          中继失败的原因。
+          这是「用户发了消息但会话列表里什么都没有」的唯一面板线索 ——
+          在这之前它只写进容器日志，而很多人根本不知道要去看那里。
+        -->
+        <div
+          v-if="bot.lastRelayError"
+          class="mt-2.5 space-y-1 rounded-lg bg-[var(--color-warn-soft)] px-2.5 py-2"
+        >
+          <p class="flex items-center gap-1.5 text-2xs font-medium text-[var(--color-warn)]">
+            <AppIcon name="warning" :size="14" class="shrink-0" />
+            消息未能中继
+            <span class="font-normal text-[var(--color-ink-subtle)]">
+              · {{ relativeTime(bot.lastRelayErrorAt) }}
+            </span>
+          </p>
+          <p class="text-2xs leading-relaxed whitespace-pre-wrap text-[var(--color-ink-muted)]">
+            {{ bot.lastRelayError }}
+          </p>
+        </div>
+
         <p
           v-if="!bot.adminGroupId"
           class="mt-2.5 flex items-start gap-1.5 rounded-lg bg-[var(--color-warn-soft)] px-2.5 py-2 text-2xs leading-relaxed text-[var(--color-warn)]"
@@ -229,6 +277,20 @@ async function confirmDelete() {
           <AppButton size="sm" variant="ghost" :disabled="checkingId === bot.id" @click="reload(bot)">
             <AppIcon name="refresh" :size="14" />
             重载
+          </AppButton>
+          <!--
+            管理机器人开关。开启后可以直接在 Telegram 里私聊这个机器人，
+            用 /start 打开菜单来托管其他机器人 —— 不必为了加一个机器人回面板。
+          -->
+          <AppButton
+            size="sm"
+            variant="ghost"
+            :class="bot.isManager ? 'text-[var(--color-accent-bright)]' : ''"
+            :disabled="checkingId === bot.id"
+            @click="toggleManager(bot)"
+          >
+            <AppIcon name="command" :size="14" />
+            {{ bot.isManager ? '管理机器人' : '设为管理' }}
           </AppButton>
           <AppButton
             size="sm"
