@@ -322,6 +322,17 @@ func (r *Runtime) dispatch(ctx context.Context, u tgapi.Update) {
 	handlerCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
+	// 管理机器人**不是**中继机器人，它只有两个入口：管理员的私聊命令，
+	// 与菜单按钮的回调。其余更新一律丢弃。
+	//
+	// 分流放在分发的最前面，而不是散进各个 handler：这是一条全局性质
+	// （控制台永不建话题、永不转发），漏掉任何一个分支都会表现为
+	// 「陌生人给控制台发了条消息，管理群里却冒出一个话题」。
+	if r.isManager {
+		r.dispatchManager(handlerCtx, u)
+		return
+	}
+
 	switch {
 	case u.CallbackQuery != nil:
 		r.handleCallback(handlerCtx, u.CallbackQuery)
@@ -334,6 +345,21 @@ func (r *Runtime) dispatch(ctx context.Context, u tgapi.Update) {
 		r.handleEditedMessage(handlerCtx, u.EditedMessage)
 	case u.Message != nil:
 		r.handleMessage(handlerCtx, u.Message)
+	}
+}
+
+// dispatchManager 是控制台机器人的分发，只有管理命令与按钮两条路。
+//
+// 群消息、编辑、成员变动这些对控制台都没有意义：它不该被拉进任何群
+// 去转发，也不该出现在话题里。因此群里的消息一律不看 —— 否则有人在
+// 群里发一句「/status」，机器人会私聊回一份系统概况，而群里的人
+// 完全不知道发生了什么。
+func (r *Runtime) dispatchManager(ctx context.Context, u tgapi.Update) {
+	switch {
+	case u.CallbackQuery != nil:
+		r.handleManagerCallback(ctx, u.CallbackQuery)
+	case u.Message != nil && u.Message.Chat.Type == "private":
+		r.handleManagerPrivate(ctx, u.Message)
 	}
 }
 
@@ -362,16 +388,10 @@ func (r *Runtime) handleMessage(ctx context.Context, m *tgapi.Message) {
 }
 
 // handlePrivate 处理私聊消息。
+//
+// 注意这里**不**判断管理机器人：控制台在 dispatch 就已经分流走了
+// （见 dispatchManager），走不到中继管线来。
 func (r *Runtime) handlePrivate(ctx context.Context, m *tgapi.Message) {
-	// 管理机器人优先：管理员的私聊走管理命令，不进中继管线。
-	//
-	// 放在最前面而不是塞进下面的 switch，是因为管理机器人的语义与
-	// 中继机器人**完全不同** —— 它不是客服入口，而是一个控制台。
-	// 混在一起会让「管理员发的测试消息突然进了话题」这种困惑变得可能。
-	if r.handleManagerPrivate(ctx, m) {
-		return
-	}
-
 	// 命令分流。注意 /start 之外以 / 开头的文本**仍然走中继** ——
 	// 用户发 "/price"、"/订单123" 这类内容非常常见，
 	// 一刀切当成「未知命令」忽略掉，用户会觉得机器人坏了。
@@ -529,12 +549,7 @@ func (r *Runtime) handleCallback(ctx context.Context, q *tgapi.CallbackQuery) {
 		_ = r.api.AnswerCallbackQuery(context.WithoutCancel(ctx), q.ID, "", false)
 	}()
 
-	// 管理机器人的按钮（mgr: 前缀）与话题按钮（tgs: 前缀）在同一台机器人上
-	// 也可能共存 —— 管理机器人自己也可能被绑了群。先分流再解析。
-	if r.handleManagerCallback(ctx, q) {
-		return
-	}
-
+	// 控制台机器人的按钮走 dispatchManager，这里只处理话题按钮（tgs: 前缀）。
 	parsed, ok := parseCallback(q.Data)
 	if !ok {
 		return

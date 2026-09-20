@@ -16,9 +16,14 @@ import AppModal from '@/components/ui/AppModal.vue';
  * 这个流程里的失败几乎全是 Telegram 侧的配置问题（没开 Topics、
  * 没给管理员权限、privacy mode 没关），一句「校验失败」会让用户
  * 去猜半小时 —— 所以每一步都把「怎么做」写在界面上。
+ *
+ * mode = 'manager' 是另一条路径：绑定**控制台机器人**。它不参与转发，
+ * 因此没有管理群这一步，一步就完事。
  */
-const props = defineProps<{ open: boolean }>();
+const props = defineProps<{ open: boolean; mode?: 'relay' | 'manager' }>();
 const emit = defineEmits<{ close: []; created: [] }>();
+
+const isManagerMode = computed(() => props.mode === 'manager');
 
 const toast = useToastStore();
 
@@ -48,6 +53,7 @@ watch(
 );
 
 const stepIndex = computed(() => (step.value === 'token' ? 1 : 2));
+const stepCount = computed(() => (isManagerMode.value ? 1 : 2));
 
 async function onValidate() {
   validating.value = true;
@@ -93,11 +99,19 @@ async function onCreate() {
       token: token.value.trim(),
       adminGroupId: Number.isFinite(parsed) ? parsed : null,
       name: validation.value?.name ?? undefined,
+      manager: isManagerMode.value,
     });
-    toast.success('机器人已创建', '正在启动长轮询，状态会实时更新');
+    if (isManagerMode.value) {
+      toast.success(
+        '管理机器人已绑定',
+        '在 Telegram 里私聊它发 /start —— 它只做管理，不参与转发',
+      );
+    } else {
+      toast.success('机器人已创建', '正在启动长轮询，状态会实时更新');
+    }
     emit('created');
   } catch (err) {
-    toast.error('创建失败', err instanceof ApiError ? err.message : '未知错误');
+    toast.error('绑定失败', err instanceof ApiError ? err.message : '未知错误');
   } finally {
     creating.value = false;
   }
@@ -107,16 +121,33 @@ async function onCreate() {
 <template>
   <AppModal
     :open="open"
-    :title="step === 'token' ? '创建机器人' : '绑定管理群'"
-    :description="`第 ${stepIndex} 步 / 共 2 步`"
+    :title="isManagerMode ? '绑定管理机器人' : step === 'token' ? '创建机器人' : '绑定管理群'"
+    :description="
+      isManagerMode ? '它只做管理，不参与消息转发' : `第 ${stepIndex} 步 / 共 ${stepCount} 步`
+    "
     width="34rem"
     @close="emit('close')"
   >
     <Transition name="step" mode="out-in">
       <div v-if="step === 'token'" key="token" class="space-y-4">
+        <!-- 控制台与管理群无关，所以在管理模式下换一套说明：
+             贴一段「先去建群、关 Privacy Mode」在这里只会让人白忙 -->
         <div
+          v-if="isManagerMode"
           class="space-y-2 rounded-xl border border-[var(--color-line-faint)] bg-[var(--color-bg-2)] p-3.5"
         >
+          <p class="text-xs font-medium">管理机器人是什么</p>
+          <p class="text-2xs leading-relaxed text-[var(--color-ink-muted)]">
+            它是你在 Telegram 里的<strong>操作入口</strong>：私聊它发
+            <code class="font-mono">/start</code>
+            就能增删托管其他机器人，不必回面板。
+            <br />
+            它<strong>不参与转发</strong> —— 谁给它发消息都不会变成话题。
+            所以它需要单独在 @BotFather 里创建，并且不需要建群、不需要关 Privacy Mode。
+          </p>
+        </div>
+
+        <div v-else class="space-y-2 rounded-xl border border-[var(--color-line-faint)] bg-[var(--color-bg-2)] p-3.5">
           <p class="text-xs font-medium">在 @BotFather 里这样操作</p>
           <ol class="space-y-1 text-2xs leading-relaxed text-[var(--color-ink-muted)]">
             <li>1. 打开 @BotFather，发送 /newbot</li>
@@ -152,10 +183,11 @@ async function onCreate() {
             <p class="text-xs font-medium text-[var(--color-success)]">
               ✅ 已验证：{{ validation.name }}（@{{ validation.username }}）
             </p>
-            <!-- Privacy Mode 是这个产品最常见的一个坑：不关掉的话
-                 机器人读不到群里的普通消息，话题中继会完全失效 -->
+            <!-- Privacy Mode 是转发路径上最常见的一个坑：不关掉的话
+                 机器人读不到群里的普通消息，话题中继会完全失效。
+                 但控制台不读群消息，这条提醒对它不适用。 -->
             <p
-              v-if="validation.canReadAllGroupMessages === false"
+              v-if="!isManagerMode && validation.canReadAllGroupMessages === false"
               class="text-2xs leading-relaxed text-[var(--color-warn)]"
             >
               ⚠️ 该机器人处于 Privacy Mode，读不到群里的普通消息。请到 @BotFather 发送
@@ -216,6 +248,8 @@ async function onCreate() {
     <template #footer>
       <template v-if="step === 'token'">
         <AppButton variant="ghost" @click="emit('close')">取消</AppButton>
+
+        <!-- 管理模式只有一步：验证完直接绑定 -->
         <AppButton
           v-if="!validation?.ok"
           variant="primary"
@@ -224,6 +258,14 @@ async function onCreate() {
           @click="onValidate"
         >
           验证 Token
+        </AppButton>
+        <AppButton
+          v-else-if="isManagerMode"
+          variant="primary"
+          :loading="creating"
+          @click="onCreate"
+        >
+          完成绑定
         </AppButton>
         <AppButton v-else variant="primary" @click="step = 'group'">
           下一步

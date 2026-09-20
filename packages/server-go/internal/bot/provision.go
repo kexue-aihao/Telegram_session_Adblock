@@ -257,10 +257,22 @@ func (m *Manager) Create(ctx context.Context, req CreateRequest) (store.BotRow, 
 	}
 
 	if req.Manager {
-		if err := m.db.SetBotManager(ctx, created.ID, true); err != nil {
-			m.log.Warn("设置管理机器人失败", "botId", created.ID, "err", err)
+		// 走 SetManagerBot 而不是直接写库：控制台只有一台，绑定新的会
+		// 解绑旧的，而旧的那台运行时必须跟着变回中继机器人。
+		//
+		// 它顺带会把新建的这台启起来，所以成功时不必再 Start 一次。
+		if err := m.SetManagerBot(ctx, created.ID, true); err != nil {
+			m.log.Warn("绑定为管理机器人失败，已按普通机器人启动", "botId", created.ID, "err", err)
+			if startErr := m.Start(ctx, created.ID); startErr != nil {
+				m.log.Warn("机器人创建成功但启动失败", "botId", created.ID, "err", startErr)
+			}
+		} else {
+			created.IsManager = true
 		}
-		created.IsManager = true
+
+		m.log.Info("已开通机器人", "botId", created.ID, "username", created.Username,
+			"manager", true, "actor", req.Actor)
+		return created, nil
 	}
 
 	// 立即启动。刻意不判断 AdminGroupID 是否已绑定 —— 未绑定的机器人

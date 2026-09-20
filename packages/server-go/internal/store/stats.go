@@ -242,13 +242,17 @@ func (s *Store) ComputeOverview(ctx context.Context, loc *time.Location, ruleSta
 	// 对 UTC+5:30 这类非整点偏移的时区会算错半天。
 	startOfToday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 
-	// 机器人状态
+	// 机器人状态。
+	//
+	// 不含控制台（is_manager = 1）：它不参与转发，算进「托管了几个机器人」
+	// 会让仪表盘的数字虚高一个，也会把它的健康状态混进中继健康度里。
 	if err := s.read.QueryRowContext(ctx, `
 		SELECT COUNT(*),
 		       COALESCE(SUM(CASE WHEN health_status = 'online' THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN health_status = 'error' THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN is_enabled = 0 THEN 1 ELSE 0 END), 0)
-		FROM bots`).Scan(&o.Bots.Total, &o.Bots.Online, &o.Bots.Error, &o.Bots.Disabled); err != nil {
+		FROM bots
+		WHERE is_manager = 0`).Scan(&o.Bots.Total, &o.Bots.Online, &o.Bots.Error, &o.Bots.Disabled); err != nil {
 		return o, err
 	}
 

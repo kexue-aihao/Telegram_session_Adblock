@@ -194,18 +194,28 @@ func (s *Server) handleUpdateBot(w http.ResponseWriter, r *http.Request) {
 		s.writeAudit(r.Context(), r, domain.ActorAdmin, &actor, action, strPtr("bot"), strPtr(itoa(id)), nil)
 	}
 
-	// 管理机器人标记。**必须重启运行时** —— 它在构造时读一次 row.IsManager
-	// 并固化到 r.isManager，而那决定了私聊消息是走管理命令还是走中继。
-	// 不重启的话，面板上开关变了、实际路由没变，是最难排查的一类不一致。
-	if req.IsManager != nil {
-		if err := s.db.SetBotManager(r.Context(), id, *req.IsManager); err != nil {
+	// 管理机器人（控制台）绑定。**必须让运行时重载** —— isManager 在构造时
+	// 固化，而它决定了这个运行时是控制台还是中继机器人。不重载的话，
+	// 面板上开关变了、实际路由没变，是最难排查的一类不一致。
+	//
+	// 绑定是唯一的：绑新的会把旧的解绑，两台运行时都要重载 ——
+	// 这件事由 bots.SetManagerBot 一并处理，因此它放在最后，
+	// 且替代了下面那次常规重启（运行时要读到的字段此时都已写完）。
+	bindingChanged := req.IsManager != nil
+
+	if err := s.db.UpdateBot(r.Context(), id, fields); err != nil {
+		s.respondError(w, err)
+		return
+	}
+
+	if bindingChanged {
+		if err := s.bots.SetManagerBot(r.Context(), id, *req.IsManager); err != nil {
 			s.respondError(w, err)
 			return
 		}
-		needsRestart = true
 
-		// 与 bot.enabled / bot.disabled 同一套命名：审计页是按 action
-		// 过滤的，「谁拿到了控制台权限」必须能被单独筛出来。
+		// 审计单独记：与 bot.enabled / bot.disabled 同一套命名，
+		// 审计页是按 action 过滤的，「谁拿到了控制台权限」必须能单独筛出来。
 		action := "bot.manager_disabled"
 		if *req.IsManager {
 			action = "bot.manager_enabled"
@@ -213,14 +223,7 @@ func (s *Server) handleUpdateBot(w http.ResponseWriter, r *http.Request) {
 		ac, _ := authFrom(r)
 		s.writeAudit(r.Context(), r, domain.ActorAdmin, &ac.Username, action,
 			strPtr("bot"), strPtr(itoa(id)), nil)
-	}
-
-	if err := s.db.UpdateBot(r.Context(), id, fields); err != nil {
-		s.respondError(w, err)
-		return
-	}
-
-	if needsRestart {
+	} else if needsRestart {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 30*time.Second)
 		defer cancel()
 

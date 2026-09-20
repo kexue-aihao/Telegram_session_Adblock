@@ -97,27 +97,31 @@ func (r *Runtime) isManagerAdmin(ctx context.Context, tgUserID int64) bool {
 	return settings.AdminTgUserID != 0 && settings.AdminTgUserID == tgUserID
 }
 
-// handleManagerPrivate 处理管理机器人的私聊。
+// handleManagerPrivate 处理控制台机器人的私聊。
 //
-// 返回 true 表示已经处理完，调用方不应再把它当中继消息。
-func (r *Runtime) handleManagerPrivate(ctx context.Context, m *tgapi.Message) bool {
-	if !r.isManager || m.From == nil {
-		return false
+// 调用方是 dispatchManager，只有控制台运行时会走到这里 —— 因此
+// 这里不再判断 r.isManager，也不再需要「返回 false 交回中继管线」
+// 这条退路：控制台没有中继管线。
+func (r *Runtime) handleManagerPrivate(ctx context.Context, m *tgapi.Message) {
+	if m.From == nil {
+		return
 	}
 
-	// 非管理员：静默当成普通私聊走中继。
+	// 非管理员：静默丢弃。
 	//
 	// 刻意不回「你不是管理员」—— 那等于向探测者确认「这个机器人有管理功能」。
-	// 保持沉默，它在对方眼里就是一个普通机器人。
+	// 保持沉默，它在对方眼里就是一个不吭声的机器人。
+	//
+	// 也刻意**不**转发：控制台不是客服入口，谁给它发消息都不会变成话题。
 	if !r.isManagerAdmin(ctx, m.From.ID) {
-		return false
+		return
 	}
 
 	text := strings.TrimSpace(m.Text)
 
 	// 会话中的输入（token / 群 ID）优先
 	if r.consumeAddFlow(ctx, m.From.ID, text) {
-		return true
+		return
 	}
 
 	if cmd := parseCommand(text); cmd != "" {
@@ -138,14 +142,13 @@ func (r *Runtime) handleManagerPrivate(ctx context.Context, m *tgapi.Message) bo
 		default:
 			r.sendToUser(ctx, m.From.ID, "未知命令。发 /help 看可用命令。")
 		}
-		return true
+		return
 	}
 
-	// 管理员发的普通文本。管理机器人**不是**客服机器人，不走中继 ——
-	// 它存在的意义是管理。但也不能静默丢弃，否则管理员会以为它坏了。
+	// 管理员发的普通文本。控制台**不**处理业务消息，但也不能静默丢弃，
+	// 否则管理员会以为它坏了。
 	r.sendToUser(ctx, m.From.ID,
 		"我是管理机器人，不处理普通消息。\n\n发 /start 打开菜单，或 /help 看命令列表。")
-	return true
 }
 
 // ────────────────────────────── 菜单 ──────────────────────────────
@@ -166,6 +169,7 @@ func (r *Runtime) sendManagerMenu(ctx context.Context, chatID int64) {
 		r.sendToUser(ctx, chatID, "读取机器人列表失败："+err.Error())
 		return
 	}
+	bots = relayBots(bots)
 
 	online, enabled := 0, 0
 	for _, b := range bots {
@@ -182,6 +186,20 @@ func (r *Runtime) sendManagerMenu(ctx context.Context, chatID int64) {
 		len(bots), enabled, online)
 
 	r.sendToUserKeyboard(ctx, chatID, text, r.managerMenuKeyboard())
+}
+
+// relayBots 滤掉控制台自己。
+//
+// 控制台不参与转发，把「自己」混在托管列表里既没有可操作项（它没有
+// 管理群、不该被体检），也会让「托管了 N 个机器人」这个数字虚高一个。
+func relayBots(rows []store.BotRow) []store.BotRow {
+	out := make([]store.BotRow, 0, len(rows))
+	for _, b := range rows {
+		if !b.IsManager {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 func (r *Runtime) sendManagerHelp(ctx context.Context, chatID int64) {
@@ -216,7 +234,8 @@ func (r *Runtime) sendBotList(ctx context.Context, chatID int64) {
 		r.sendToUser(ctx, chatID, "读取机器人列表失败："+err.Error())
 		return
 	}
-	r.sendBotListTo(ctx, chatID, bots)
+	// 控制台自己不在这个列表里：它是操作入口，不是被托管的机器人
+	r.sendBotListTo(ctx, chatID, relayBots(bots))
 }
 
 func (r *Runtime) sendBotListTo(ctx context.Context, chatID int64, bots []store.BotRow) {
@@ -232,8 +251,8 @@ func (r *Runtime) sendBotListTo(ctx context.Context, chatID int64, bots []store.
 	for i, b := range bots {
 		sb.WriteString(fmt.Sprintf("\n%d. %s %s",
 			i+1, healthEmoji(b.HealthStatus), escapeMarkdown(b.Name)))
-		if b.IsManager {
-			sb.WriteString("  ·管理")
+		if !b.IsEnabled {
+			sb.WriteString(" ⏸")
 		}
 	}
 
@@ -292,7 +311,10 @@ func (r *Runtime) sendBotDetail(ctx context.Context, chatID, botID int64) {
 	fmt.Fprintf(&sb, "最后轮询：%s\n", relativeTimeText(row.LastPolledAt))
 
 	if row.IsManager {
-		sb.WriteString("\n🛠️ 这是**管理机器人**\n")
+		// 正常路径下到不了这里：控制台不在托管列表里，也就点不出它的详情。
+		// 留着这条是为了万一（例如旧版本留下的两条标记）不至于显示成
+		// 一台「没有管理群的转发机器人」。
+		sb.WriteString("\n🛠️ 这是**管理机器人**（控制台），不参与转发\n")
 	}
 	if row.LastError != nil && *row.LastError != "" {
 		fmt.Fprintf(&sb, "\n🔴 %s\n", escapeMarkdown(*row.LastError))
@@ -346,6 +368,9 @@ func (r *Runtime) sendManagerStatus(ctx context.Context, chatID int64) {
 	if err != nil {
 		r.log.Warn("读取统计失败", "err", err)
 	}
+
+	// 只数中继机器人。控制台自己不该被算进「托管了几个机器人」。
+	bots = relayBots(bots)
 
 	online, disabled, errored := 0, 0, 0
 	for _, b := range bots {
@@ -553,14 +578,16 @@ func (r *Runtime) finishAddFlow(ctx context.Context, chatID int64, flow *addFlow
 
 // ────────────────────────────── 按钮回调 ──────────────────────────────
 
-// handleManagerCallback 处理管理机器人的按钮。返回 true 表示已处理。
-func (r *Runtime) handleManagerCallback(ctx context.Context, q *tgapi.CallbackQuery) bool {
-	if !r.isManager || q.From == nil {
-		return false
+// handleManagerCallback 处理管理机器人的按钮回调。
+//
+// 只有控制台运行时能走到这里（dispatchManager 分流）。
+func (r *Runtime) handleManagerCallback(ctx context.Context, q *tgapi.CallbackQuery) {
+	if q.From == nil {
+		return
 	}
 	action, id, ok := parseMgrCallback(q.Data)
 	if !ok {
-		return false
+		return
 	}
 
 	// 与命令走同一条安全边界：非管理员的点击一律忽略。
@@ -568,7 +595,7 @@ func (r *Runtime) handleManagerCallback(ctx context.Context, q *tgapi.CallbackQu
 	// 这一条不能省 —— 按钮消息可能被转发出去，别人点得到。
 	if !r.isManagerAdmin(ctx, q.From.ID) {
 		_ = r.api.AnswerCallbackQuery(ctx, q.ID, "无权操作", true)
-		return true
+		return
 	}
 
 	chatID := q.From.ID
@@ -622,8 +649,6 @@ func (r *Runtime) handleManagerCallback(ctx context.Context, q *tgapi.CallbackQu
 		}
 		r.sendBotList(ctx, chatID)
 	}
-
-	return true
 }
 
 func (r *Runtime) sendDeleteConfirm(ctx context.Context, chatID, botID int64) {

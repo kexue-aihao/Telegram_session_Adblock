@@ -42,6 +42,14 @@ useWsEvent<Overview>('stats.tick', (payload) => {
 const sparkPoints = computed(() => (series.data.value?.points ?? []).map((p) => p.messagesIn));
 
 /**
+ * 只列托管（转发）机器人。
+ *
+ * 控制台不参与转发，仪表盘上的「机器人」磁贴与这里的列表都是关于
+ * 转发链路的 —— 把它列进来会与磁贴的数字对不上（那里已把它排除）。
+ */
+const hostedBots = computed(() => (bots.data.value?.items ?? []).filter((b) => !b.isManager));
+
+/**
  * 是否值得画折线。
  *
  * 只判断「点数够不够」是不够的：后端会给缺失的日期补 0，所以新装好的
@@ -255,7 +263,7 @@ const stagger = (index: number) => ({
           </div>
 
           <AppEmpty
-            v-else-if="(bots.data.value?.items.length ?? 0) === 0"
+            v-else-if="hostedBots.length === 0"
             compact
             icon="bot"
             title="还没有添加机器人"
@@ -264,7 +272,7 @@ const stagger = (index: number) => ({
 
           <div
             v-else
-            v-for="bot in bots.data.value?.items"
+            v-for="bot in hostedBots"
             :key="bot.id"
             class="border-b border-[var(--color-line-faint)] px-4 py-3 last:border-b-0"
           >

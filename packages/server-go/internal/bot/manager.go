@@ -160,6 +160,54 @@ func (m *Manager) Reload(ctx context.Context, botID int64) error {
 	return m.Start(ctx, botID)
 }
 
+// SetManagerBot 绑定或解绑管理机器人（控制台），并让受影响的运行时按新身份重载。
+//
+// 必须重启运行时：isManager 是构造时固化下来的，它决定了这个运行时
+// 是「控制台」还是「中继机器人」。不重启的话，面板上开关变了、实际路由
+// 没变 —— 是最难排查的一类不一致。
+//
+// 解绑旧的也要重启：它要从控制台变回普通中继机器人。绑定是唯一的，
+// 所以「新绑一台」必然意味着「旧的那台要变回去」，两台都得动。
+func (m *Manager) SetManagerBot(ctx context.Context, botID int64, on bool) error {
+	previous := int64(0)
+	if row, err := m.db.GetManagerBot(ctx); err == nil {
+		previous = row.ID
+	}
+
+	if on {
+		if err := m.db.SetManagerBot(ctx, botID); err != nil {
+			return err
+		}
+	} else if err := m.db.ClearManagerBot(ctx, botID); err != nil {
+		return err
+	}
+
+	m.reloadByState(ctx, botID)
+	if previous != 0 && previous != botID {
+		m.reloadByState(ctx, previous)
+	}
+
+	m.log.Info("管理机器人绑定已变更", "botId", botID, "manager", on, "previous", previous)
+	return nil
+}
+
+// reloadByState 按库里当前的状态重载某个运行时：停用的停掉，启用的重起。
+//
+// 不区分这两种情况的话，停用中的机器人会因为一次绑定变更被意外拉起来。
+func (m *Manager) reloadByState(ctx context.Context, botID int64) {
+	row, err := m.db.GetBot(ctx, botID)
+	if err != nil {
+		return
+	}
+	if !row.IsEnabled {
+		m.Stop(ctx, botID)
+		return
+	}
+	if err := m.Start(ctx, botID); err != nil {
+		m.log.Warn("重载运行时失败", "botId", botID, "err", err)
+	}
+}
+
 // StopAll 优雅关闭：先停轮询，等在途任务收尾。
 func (m *Manager) StopAll(ctx context.Context) {
 	m.mu.Lock()

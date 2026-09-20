@@ -60,16 +60,22 @@ func newTestRuntime(t *testing.T, isManager bool, adminTgID int64) (*Runtime, *s
 // stubTG 是一个假的 Telegram API。
 //
 // 存在的理由：管理命令的**每一条**路径都会回消息，而这些测试要验的是
-// 「哪些输入会被放行」。没有客户端的话，每个用例都会在回消息那一步
-// 变成 nil 解引用 —— 测的就不再是放行逻辑了。
+// 「哪些输入会被放行、哪些输入会变成一次转发」。没有客户端的话，
+// 每个用例都会在回消息那一步变成 nil 解引用 —— 测的就不再是路由逻辑了。
 //
 // 走 httptest 而不是给 Runtime 抽一层接口：tgapi.Options 本来就有 BaseURL
 // （为自建反代准备的），测试直接复用，生产代码一行都不用为测试让步。
 type stubTG struct {
 	srv *httptest.Server
 
-	mu   sync.Mutex
-	sent []map[string]any
+	mu    sync.Mutex
+	calls []stubCall
+}
+
+// stubCall 是一次 API 调用。方法名从 URL 末段取，与真实客户端的拼法一致。
+type stubCall struct {
+	method string
+	params map[string]any
 }
 
 func newStubTG(t *testing.T) *stubTG {
@@ -77,11 +83,16 @@ func newStubTG(t *testing.T) *stubTG {
 
 	s := &stubTG{}
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		var params map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&params)
+
+		method := r.URL.Path
+		if i := strings.LastIndex(method, "/"); i >= 0 {
+			method = method[i+1:]
+		}
 
 		s.mu.Lock()
-		s.sent = append(s.sent, body)
+		s.calls = append(s.calls, stubCall{method: method, params: params})
 		s.mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
@@ -103,11 +114,23 @@ func (s *stubTG) texts() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	out := make([]string, 0, len(s.sent))
-	for _, m := range s.sent {
-		if text, ok := m["text"].(string); ok {
+	out := make([]string, 0, len(s.calls))
+	for _, c := range s.calls {
+		if text, ok := c.params["text"].(string); ok {
 			out = append(out, text)
 		}
+	}
+	return out
+}
+
+// methods 返回所有被调用过的方法名（如 sendMessage、createForumTopic）。
+func (s *stubTG) methods() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]string, 0, len(s.calls))
+	for _, c := range s.calls {
+		out = append(out, c.method)
 	}
 	return out
 }
@@ -157,57 +180,96 @@ func TestManagerAdminGate(t *testing.T) {
 	}
 }
 
-// handleManagerPrivate 才是真正的入口，isManagerAdmin 只是它用的一道判断。
-// 这里验入口本身的两个行为：
+// 控制台**不是**中继机器人 —— 这条性质必须在分发层成立，因为它是一条
+// 全局性质：谁给控制台发消息都不该变成话题、不该被转发进管理群。
 //
-//	陌生人 → 交回中继管线，并且**一个字都不回**
-//	管理员 → 消费掉，不进中继
-func TestManagerPrivateRouting(t *testing.T) {
+// 所以这里从 dispatch 进，而不是直接调 handleManagerPrivate：
+// 那样就绕开了「分流本身对不对」这个最该被盯住的地方。
+func TestManagerNeverRelays(t *testing.T) {
 	ctx := context.Background()
 
-	const adminID = 111
-	msg := func(from int64, text string) *tgapi.Message {
+	private := func(from int64, text string) *tgapi.Message {
 		return &tgapi.Message{
 			From: &tgapi.User{ID: from},
 			Chat: tgapi.Chat{ID: from, Type: "private"},
 			Text: text,
 		}
 	}
-
-	t.Run("陌生人发来的消息不进管理命令，也不回话", func(t *testing.T) {
-		r, tg := newTestRuntime(t, true, adminID)
-
-		if r.handleManagerPrivate(ctx, msg(222, "/start")) {
-			t.Error("陌生人的消息不该被管理命令消费")
+	group := func(from int64, text string) *tgapi.Message {
+		return &tgapi.Message{
+			From: &tgapi.User{ID: from},
+			Chat: tgapi.Chat{ID: -1001234567890, Type: "supergroup"},
+			Text: text,
 		}
-		// 回一句「你不是管理员」等于向探测者确认这台机器人有管理功能
-		if texts := tg.texts(); len(texts) != 0 {
-			t.Errorf("不该给陌生人任何回复，实际回了：%v", texts)
-		}
-	})
+	}
 
-	t.Run("管理员 /start 拿到菜单，且不进中继", func(t *testing.T) {
-		r, tg := newTestRuntime(t, true, adminID)
+	cases := []struct {
+		name    string
+		from    int64
+		message *tgapi.Message
+	}{
+		{"陌生人发的普通消息", 222, private(222, "你好")},
+		{"陌生人发的 /start", 222, private(222, "/start")},
+		{"陌生人发的 /join 之类的群指令", 222, private(222, "/status")},
+		{"管理员在群里发命令", 111, group(111, "/status")},
+		{"陌生人在群里发消息", 222, group(222, "你好")},
+	}
 
-		if !r.handleManagerPrivate(ctx, msg(adminID, "/start")) {
-			t.Fatal("管理员的命令应当被消费，否则会掉进中继管线")
-		}
-		texts := tg.texts()
-		if len(texts) != 1 || !strings.Contains(texts[0], "管理台") {
-			t.Errorf("应当回一条主菜单，实际：%v", texts)
-		}
-	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, tg := newTestRuntime(t, true, 111)
 
-	t.Run("未配置 adminTgUserId 时谁发都不处理", func(t *testing.T) {
-		r, tg := newTestRuntime(t, true, 0)
+			r.dispatch(ctx, tgapi.Update{Message: tc.message})
 
-		if r.handleManagerPrivate(ctx, msg(adminID, "/start")) {
-			t.Error("未配置管理员时不该消费任何私聊")
-		}
-		if texts := tg.texts(); len(texts) != 0 {
-			t.Errorf("不该回任何消息，实际：%v", texts)
-		}
-	})
+			// 一、没有发出任何请求。中继的每一步（建话题、转发、回复）
+			// 都要调 Telegram，零请求就等于「什么都没发生」。
+			if texts := tg.texts(); len(texts) != 0 {
+				t.Errorf("控制台不该回话，实际回了：%v", texts)
+			}
+			if methods := tg.methods(); len(methods) != 0 {
+				t.Errorf("控制台不该调用任何 Telegram 接口，实际调了：%v", methods)
+			}
+
+			// 二、也没有进中继管线 —— 进过的痕迹是留下一个联系人
+			if _, err := r.db.GetContactByTgID(ctx, 0, tc.from); err == nil {
+				t.Error("消息进了中继管线：库里多了一个联系人")
+			}
+		})
+	}
+}
+
+// 管理员自己的命令当然要能用 —— 上面那条测试很容易写成「谁都不理」。
+func TestManagerAnswersAdmin(t *testing.T) {
+	ctx := context.Background()
+	r, tg := newTestRuntime(t, true, 111)
+
+	r.dispatch(ctx, tgapi.Update{Message: &tgapi.Message{
+		From: &tgapi.User{ID: 111},
+		Chat: tgapi.Chat{ID: 111, Type: "private"},
+		Text: "/start",
+	}})
+
+	texts := tg.texts()
+	if len(texts) != 1 || !strings.Contains(texts[0], "管理台") {
+		t.Errorf("管理员发 /start 应当收到主菜单，实际：%v", texts)
+	}
+}
+
+// 未配置 adminTgUserId 时，谁发都不处理 —— 这是最容易被写成
+// 「没配置就是没限制」的一条。
+func TestManagerDisabledWithoutAdminID(t *testing.T) {
+	ctx := context.Background()
+	r, tg := newTestRuntime(t, true, 0)
+
+	r.dispatch(ctx, tgapi.Update{Message: &tgapi.Message{
+		From: &tgapi.User{ID: 111},
+		Chat: tgapi.Chat{ID: 111, Type: "private"},
+		Text: "/start",
+	}})
+
+	if texts := tg.texts(); len(texts) != 0 {
+		t.Errorf("未配置管理员时不该回任何消息，实际：%v", texts)
+	}
 }
 
 func TestParseMgrCallback(t *testing.T) {

@@ -42,10 +42,16 @@ watch(
 const bots = useAsync<{ items: Bot[] }>(() => api.get('/api/bots'));
 const selectedBotId = ref<number | null>(null);
 
+/**
+ * 只有托管（转发）机器人有「按机器人」的设置。
+ * 控制台不参与转发，话题行为、阶梯处罚、面向用户的文案对它都没有意义。
+ */
+const hostedBots = computed(() => (bots.data.value?.items ?? []).filter((b) => !b.isManager));
+
 watch(
-  () => bots.data.value?.items,
+  hostedBots,
   (items) => {
-    if (selectedBotId.value === null && items && items.length > 0) {
+    if (selectedBotId.value === null && items.length > 0) {
       selectedBotId.value = items[0]!.id;
     }
   },
@@ -190,11 +196,11 @@ async function changePassword() {
           class="space-y-3 rounded-xl border border-[var(--color-line-faint)] bg-[var(--color-bg-2)] px-3.5 py-3"
         >
           <div>
-            <p class="text-xs font-medium">管理机器人的管理员</p>
+            <p class="text-xs font-medium">谁能操作管理机器人</p>
             <p class="mt-0.5 text-2xs leading-relaxed text-[var(--color-ink-subtle)]">
               填<strong>你自己的</strong> Telegram 数字 ID。只有这个 ID 能用管理命令 ——
-              在 Telegram 里私聊被标记为「管理机器人」的那个机器人，
-              发 <code class="font-mono">/start</code> 就能打开菜单，
+              在「机器人」页绑定一台管理机器人之后，私聊它发
+              <code class="font-mono">/start</code> 就能打开菜单，
               直接在 Telegram 里增删托管其他机器人。
             </p>
           </div>
@@ -258,18 +264,14 @@ async function changePassword() {
             阶梯处罚、话题行为与全部面向用户的文案
           </p>
         </div>
-        <AppSelect
-          v-if="(bots.data.value?.items.length ?? 0) > 0"
-          v-model="selectedBotId"
-          class="h-8 w-48 text-xs"
-        >
-          <option v-for="bot in bots.data.value?.items" :key="bot.id" :value="bot.id">
+        <AppSelect v-if="hostedBots.length > 0" v-model="selectedBotId" class="h-8 w-48 text-xs">
+          <option v-for="bot in hostedBots" :key="bot.id" :value="bot.id">
             {{ bot.name }}
           </option>
         </AppSelect>
       </div>
 
-      <p v-if="(bots.data.value?.items.length ?? 0) === 0" class="mt-4 text-xs text-[var(--color-ink-subtle)]">
+      <p v-if="hostedBots.length === 0" class="mt-4 text-xs text-[var(--color-ink-subtle)]">
         还没有添加机器人。
       </p>
 

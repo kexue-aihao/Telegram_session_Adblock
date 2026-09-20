@@ -513,17 +513,43 @@ func joinComma(parts []string) string {
 
 // ────────────────────────────── 管理机器人 ──────────────────────────────
 
-// SetBotManager 把某个机器人设为（或取消）管理机器人。
+// SetManagerBot 把某台机器人绑定为管理机器人（控制台）。
 //
-// 刻意**不**强制全局唯一：多设几个不会造成安全问题（权限判断在
-// 运行时的 adminTgUserID 上），而「同时只能有一个」需要在设置里
-// 做一次事务性的清除，收益不抵复杂度。
-// 界面上会提示「当前的管理机器人是哪个」，语义足够清楚。
-func (s *Store) SetBotManager(ctx context.Context, id int64, isManager bool) error {
+// 「控制台」全局只有一台 —— 它是这个项目的操作入口，而不是一类角色。
+// 所以这里在**同一个事务**里清旧的点亮的：分成两次 UPDATE 的话，
+// 中间失败会留下两台（或零台）控制台，而面板会显示成一个自相矛盾的状态。
+func (s *Store) SetManagerBot(ctx context.Context, id int64) error {
+	now := time.Now().UnixMilli()
+
+	return s.WithTx(ctx, func(tx *Tx) error {
+		if _, err := tx.Exec(
+			`UPDATE bots SET is_manager = 0, updated_at = ? WHERE is_manager = 1 AND id != ?`,
+			now, id); err != nil {
+			return err
+		}
+		_, err := tx.Exec(
+			`UPDATE bots SET is_manager = 1, updated_at = ? WHERE id = ?`, now, id)
+		return err
+	})
+}
+
+// ClearManagerBot 解除某台机器人的控制台身份，它随即变回普通的中继机器人。
+func (s *Store) ClearManagerBot(ctx context.Context, id int64) error {
 	_, err := s.write.ExecContext(ctx,
-		`UPDATE bots SET is_manager = ?, updated_at = ? WHERE id = ?`,
-		boolToInt(isManager), time.Now().UnixMilli(), id)
+		`UPDATE bots SET is_manager = 0, updated_at = ? WHERE id = ?`,
+		time.Now().UnixMilli(), id)
 	return err
+}
+
+// GetManagerBot 取当前的控制台机器人。没有则返回 ErrNotFound。
+func (s *Store) GetManagerBot(ctx context.Context) (BotRow, error) {
+	row := s.read.QueryRowContext(ctx,
+		`SELECT `+botColumns+` FROM bots WHERE is_manager = 1 ORDER BY id LIMIT 1`)
+	b, err := scanBot(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return BotRow{}, ErrNotFound
+	}
+	return b, err
 }
 
 // SetRelayError 记录最近一次中继失败的原因。
