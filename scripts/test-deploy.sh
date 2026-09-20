@@ -45,6 +45,56 @@ not_contains() {
   fi
 }
 
+# 检查生成的 compose 里有没有「空的顶层映射」。
+#
+# 这不是杞人忧天：脚本曾经在末尾留过一段**只含注释**的
+#
+#     volumes:
+#       # 数据用目录挂载，不需要命名卷
+#
+# YAML 会把它解析成 null，而 Compose 要求 volumes 是 mapping，
+# 于是在用户机器上炸出「validating ...: volumes must be a mapping」。
+# 那段注释读起来完全无害 —— 问题出在那个孤零零的键上。
+#
+# 早先的测试没抓到它，因为 docker 是桩件、对所有子命令都返回成功，
+# 桩件不会解析 YAML。所以这里直接看文本结构：
+# 一个顶层键后面若只有空行与注释，就判定为空映射。
+check_compose_structure() {
+  local desc="$1" file="$2" empties cramped
+  empties="$(awk '
+    /^[a-zA-Z_][a-zA-Z0-9_]*:/ {
+      if (key != "" && !found) print key
+      key = $0
+      sub(/:.*$/, "", key)
+      rest = $0
+      sub(/^[^:]*:/, "", rest)
+      gsub(/[ \t]/, "", rest)
+      found = (rest != "") ? 1 : 0
+      next
+    }
+    # 缩进的、且首字符不是 # 的行才算「有内容」
+    /^[ \t]+[^ \t#]/ { if (key != "") found = 1 }
+    END { if (key != "" && !found) print key }
+  ' "$file")"
+
+  # 顶层键之间应当有空行。这不是 YAML 的要求（列 0 的键本来就会关闭
+  # 上层映射），而是可读性 —— 而且它正好能抓到「靠命令替换剥掉换行
+  # 凑出来的格式」这类问题：那种写法在功能上没错，但读起来像是错的。
+  cramped="$(awk '
+    /^[a-zA-Z_]/ { if (prev != "" && prev !~ /^$/) print $1; prev = $0; next }
+    { prev = $0 }
+  ' "$file")"
+
+  if [ -n "$empties" ] || [ -n "$cramped" ]; then
+    printf '  \033[31m✗\033[0m %s\n' "$desc"
+    [ -n "$empties" ] && printf '      空映射（会被解析成 null）：%s\n' "$empties"
+    [ -n "$cramped" ] && printf '      顶层键前缺空行：%s\n' "$cramped"
+    FAIL=$((FAIL+1))
+  else
+    printf '  \033[32m✓\033[0m %s\n' "$desc"; PASS=$((PASS+1))
+  fi
+}
+
 # ── 桩件：伪造 root、Docker CLI 与 compose ──────────────────────
 cat > "$STUB/id" <<'EOF'
 #!/usr/bin/env bash
@@ -108,6 +158,7 @@ contains "compose 映射到 127.0.0.1:8787" "127.0.0.1:8787:8787" "$comp1"
 contains "compose 挂载 ./data" "./data:/data" "$comp1"
 contains "compose 用二进制自检做探针" "['CMD', '/tgs', '-healthcheck']" "$comp1"
 not_contains "无 1panel-network 时不写 networks 段" "1panel-network" "$comp1"
+check_compose_structure "compose 结构无空映射（无 1panel-network）" "$WORK/data/docker-compose.yml"
 
 # 记录第一次的密钥与状态，用于稍后比对
 KEY1="$(grep '^MASTER_KEY=' "$WORK/data/.env")"
@@ -135,6 +186,7 @@ rm -rf "$WORK/data"; mkdir -p "$WORK/data"
 run_deploy --port 9000 >/dev/null
 comp="$(cat "$WORK/data/docker-compose.yml")"
 contains "首次用的是 9000" "127.0.0.1:9000:8787" "$comp"
+check_compose_structure "compose 结构无空映射（自定义端口）" "$WORK/data/docker-compose.yml"
 
 # 再跑一次且**不带 --port** —— 这正是会踩坑的场景
 run_deploy >/dev/null
@@ -154,6 +206,7 @@ comp="$(cat "$WORK/data/docker-compose.yml")"
 contains "compose 声明了 networks" "networks:" "$comp"
 contains "加入 1panel-network" "- 1panel-network" "$comp"
 contains "声明为外部网络" "external: true" "$comp"
+check_compose_structure "compose 结构无空映射（含 1panel-network）" "$WORK/data/docker-compose.yml"
 
 # ══════════════════ 场景 5：参数校验 ══════════════════
 echo

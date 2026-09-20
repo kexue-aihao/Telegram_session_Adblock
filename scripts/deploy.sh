@@ -375,12 +375,27 @@ EOF
 write_compose() {
   local compose_file="$DATA_DIR/docker-compose.yml"
 
-  local networks_block="" network_line=""
+  # 可选的 networks 段。
+  #
+  # 检测到 1Panel 的网络时让容器也加入：除了 127.0.0.1:端口，
+  # 还能用容器名访问，兼容按容器名配上游的反代。
+  #
+  # 用字面量字符串而不是 `$(printf ...)` 拼接：命令替换会**吃掉结尾的换行**，
+  # 于是紧跟在后面的顶层 `networks:` 会粘在上一行上 ——
+  # YAML 上仍然合法（列 0 的键会关闭上层映射），但读起来像是错的，
+  # 而且这种「靠 $() 的剥除行为凑出来的格式」非常容易被下一次改动破坏。
+  #
+  # 字符串以空行开头，保证与上面的 security_opt 段分开。
+  local networks_section=""
   if docker network inspect "$PANEL_NETWORK" >/dev/null 2>&1; then
-    # 1Panel 创建了这个网络，让容器也加入：
-    # 除了 127.0.0.1:端口，还能用容器名访问，兼容按容器名配上游的反代。
-    network_line="      - ${PANEL_NETWORK}"
-    networks_block=$'\n'"networks:"$'\n'"  ${PANEL_NETWORK}:"$'\n'"    external: true"
+    networks_section="
+
+    networks:
+      - ${PANEL_NETWORK}
+
+networks:
+  ${PANEL_NETWORK}:
+    external: true"
   fi
 
   cat > "$compose_file" <<EOF
@@ -420,13 +435,17 @@ services:
       - /tmp
 
     security_opt:
-      - no-new-privileges:true
-$([ -n "$network_line" ] && printf '\n    networks:\n%s\n' "$network_line")${networks_block}
-
-volumes:
-  # 数据直接落在 ${DATA_DIR}/data，
-  # 不使用命名卷 —— 1Panel 的备份与文件管理器只认目录。
+      - no-new-privileges:true${networks_section}
 EOF
+  # 注意这里**没有**顶层 volumes: 段。
+  #
+  # 数据用的是目录挂载（./data:/data），不是命名卷，因此不需要声明。
+  # 曾经在这里留过一段只含注释的 `volumes:` —— YAML 会把它解析成 null，
+  # 而 Compose 要求它是 mapping，于是报
+  #「validating ...: volumes must be a mapping」。
+  # 那段注释看着无害，但一个空的映射键不是。
+  #
+  # 数据目录之所以用挂载而非命名卷：1Panel 的备份与文件管理器只认目录。
 
   ok "已写入 $compose_file"
 }
@@ -435,11 +454,35 @@ EOF
 
 pull_image() {
   step "拉取镜像"
+
+  # 先让 compose 自己校验一遍配置文件。
+  #
+  # 这一步不是多余的：compose 的语法错误（比如一个空的映射键）只在
+  # 真正执行子命令时才暴露，而 `pull` 失败时的报错看起来很像网络问题。
+  # 单独校验能让「配置写错了」和「网线断了」在提示上就分开 ——
+  # 排查方向不同，混在一起会让人先去查网络。
+  if ! $COMPOSE -f "$DATA_DIR/docker-compose.yml" config -q 2>/tmp/tgs-compose-err; then
+    warn "生成的 compose 文件没有通过校验："
+    sed 's/^/    /' /tmp/tgs-compose-err >&2
+    rm -f /tmp/tgs-compose-err
+    die "这是脚本的 bug，请把上面这段贴到
+    https://github.com/kexue-aihao/Telegram_session_Adblock/issues
+
+    临时绕过：文件在 $DATA_DIR/docker-compose.yml，可手工修正后执行
+    cd $DATA_DIR && $COMPOSE up -d"
+  fi
+  rm -f /tmp/tgs-compose-err
+  ok "配置文件校验通过"
+
   info "${IMAGE_REPO}:${TAG}"
 
   if ! $COMPOSE -f "$DATA_DIR/docker-compose.yml" pull; then
-    die "镜像拉取失败。检查网络，或确认标签 '$TAG' 存在：
-    https://github.com/kexue-aihao/Telegram_session_Adblock/pkgs/container/telegram_session_adblock"
+    die "镜像拉取失败。常见原因：
+
+    · 标签不存在 —— 确认 '$TAG' 有效：
+      https://github.com/kexue-aihao/Telegram_session_Adblock/pkgs/container/telegram_session_adblock
+    · 网络到 ghcr.io 不通（国内服务器常见），可为 Docker 配代理后重试
+    · 磁盘空间不足 —— df -h 看一下"
   fi
   ok "镜像就绪"
 }
