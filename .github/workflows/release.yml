@@ -205,6 +205,13 @@ jobs:
           name: binaries
           path: dist
 
+      # 把部署脚本也作为 Release 资产发布。
+      #
+      # 脚本里的 raw.githubusercontent 链接指向 master，会随仓库漂移；
+      # 作为资产附在这里，用户就能拿到与**这个版本**配套的那一份。
+      - name: 附上部署脚本
+        run: cp scripts/deploy.sh dist/deploy.sh
+
       # 与镜像任务同样的原因：GHCR 的名字必须全小写
       - name: 计算小写的镜像名
         id: repo
@@ -218,6 +225,24 @@ jobs:
           generate_release_notes: true
           draft: false
           body: |
+            ## 一键部署
+
+            在服务器上执行（需要 root）：
+
+            ```bash
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/deploy.sh | sudo bash
+            ```
+
+            脚本会自动判断是首次安装还是升级：
+
+            - **首次**：生成 `MASTER_KEY` 与 `SESSION_SECRET`，询问管理员密码，
+              拉取镜像并启动，最后打印反向代理该填什么。
+            - **再次运行**：拉取新镜像并重启容器。**数据与密钥原样保留**，
+              端口也保持不变。
+
+            > `MASTER_KEY` 用来加密库里存的 bot token，脚本在任何情况下都不会覆盖它。
+            > 升级前还会自动备份 `.env`。
+
             ## 容器镜像
 
             ```bash
@@ -226,11 +251,26 @@ jobs:
 
             支持 `linux/amd64` 与 `linux/arm64`。镜像基于 `scratch` ——
             没有 shell、没有包管理器，全部内容只有一个静态链接的二进制、
-            CA 证书与前端产物。
+            CA 证书与前端产物，约 20MB。
+
+            ### 在 1Panel 上建站
+
+            容器默认发布到 `127.0.0.1:8787`，
+            1Panel 的反向代理直接填：
+
+            ```
+            代理地址  http://127.0.0.1:8787
+            发送域名  $host
+            ```
+
+            这个上游地址可行是因为 1Panel 的 OpenResty 使用 `network_mode: host`，
+            容器内的 `127.0.0.1` 就是宿主机的 loopback。
+            脚本还会在检测到 `1panel-network` 时让容器加入它，
+            因此按容器名配上游（`http://tgs-panel:8787`）同样可行。
 
             ## 独立二进制
 
-            下载对应平台的压缩包，解压后：
+            不想用 Docker 的话，下载对应平台的压缩包：
 
             ```bash
             cp .env.example .env
@@ -238,12 +278,10 @@ jobs:
             ./tgs
             ```
 
-            二进制是静态链接的（`CGO_ENABLED=0`），不依赖系统库，
+            二进制静态链接（`CGO_ENABLED=0`），不依赖系统库，
             时区数据库也已编入 —— 可以直接扔进任何 Linux 发行版运行。
 
             ## 校验
-
-            下载后可用 `SHA256SUMS.txt` 核对完整性：
 
             ```bash
             sha256sum -c SHA256SUMS.txt

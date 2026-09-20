@@ -128,27 +128,109 @@ pnpm dev
 
 ## 生产部署
 
-### Docker Compose
+### 一键部署脚本（推荐）
+
+在服务器上执行：
 
 ```bash
-# .env 里填好 MASTER_KEY / SESSION_SECRET / ADMIN_PASSWORD
-docker compose up -d
+curl -fsSL https://raw.githubusercontent.com/kexue-aihao/Telegram_session_Adblock/master/scripts/deploy.sh | sudo bash
 ```
 
-面板监听 `127.0.0.1:8787`（只绑回环）。用 Caddy 反代并自动签发证书：
+脚本会自动判断该走哪条路：
+
+| 检测到的状态 | 行为 |
+|---|---|
+| 无容器、无数据、无配置 | **首次安装**：生成密钥、询问管理员密码、拉镜像、启动 |
+| 三者任一存在 | **升级**：拉新镜像、重启容器，**数据与密钥原样保留** |
+
+「已存在」用的是三者取并集而不是只看容器 —— 容器可能被人手动删了而数据还在，
+那种情况下必须走升级路径，否则会重新生成 `MASTER_KEY`，把库里已有的 bot token 全部作废。
+
+结束时它会打印反向代理该填什么、以及后续常用命令。
+
+<details>
+<summary>可选参数</summary>
+
+```bash
+--port PORT          监听端口（默认 8787）
+--bind ADDR          绑定的宿主地址（默认 127.0.0.1）
+--tag TAG            镜像标签（默认 latest）
+--dir DIR            数据目录（默认自动选择）
+--admin-password P   首次安装的管理员密码（不传则交互式询问）
+--yes                不询问（自动化用）
+--uninstall          卸载容器，保留数据
+--purge              卸载并删除数据（不可恢复，必须人工确认）
+```
+
+数据目录默认值：检测到 1Panel 时用 `/opt/1panel/apps/telegram-session-adblock`，
+否则用 `/opt/tgs`。
+
+</details>
+
+> ⚠️ **`MASTER_KEY` 是唯一不可再生的东西。** 它用来加密库里存的 bot token，
+> 一旦变化，所有已保存的 token 都解不开，必须逐个重新录入。
+> 脚本在任何情况下都不会覆盖它，升级前还会把 `.env` 备份到同目录的 `.env.bak.<时间戳>`。
+> 请把它一并纳入你的备份。
+
+### 在 1Panel 上建站
+
+容器默认发布到 `127.0.0.1:8787`。在 1Panel 里：
+
+```
+网站 → 创建网站 → 反向代理
+  主域名      panel.example.com
+  代理地址    http://127.0.0.1:8787
+  发送域名    $host
+```
+
+然后在该网站的「SSL」页签申请证书并开启 HTTPS。
+
+**为什么上游填 `127.0.0.1` 就能通**：1Panel 的 OpenResty 容器使用
+`network_mode: host`（见 [appstore 仓库](https://github.com/1Panel-dev/appstore/blob/dev/apps/openresty/1.31.1.1-2-4-noble/docker-compose.yml)
+里 openresty 的 compose 定义），与宿主共享网络栈 ——
+所以容器里的 `127.0.0.1` 就是宿主机的 loopback，正好命中 Docker 发布出来的那个端口。
+
+脚本还会在检测到 `1panel-network` 时让容器加入它，因此如果你的反代是按容器名配上游，
+填 `http://tgs-panel:8787` 同样可行。
+
+### 其他反代
+
+```nginx
+# Nginx
+location / {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    # WebSocket 必须转发这两个头，否则面板的实时推送会失效
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+}
+```
 
 ```caddyfile
+# Caddy（默认就会转发 WebSocket）
 panel.example.com {
     reverse_proxy 127.0.0.1:8787
 }
 ```
 
-> Caddy 默认会转发 WebSocket，无需额外配置。若用 Nginx，记得补 `Upgrade` 与 `Connection` 头。
+> 前端的实时更新走 WebSocket（`/ws`）。反代如果没转发 `Upgrade` 头，
+> 面板仍能打开、数据仍会加载，但顶栏会一直显示「连接已断开，正在重连」——
+> 是个容易误判成后端故障的现象。
 
-数据全部在 `tgs-data` 卷里的 `app.db` 一个文件。备份就是复制它：
+### 手动 Docker Compose
+
+不想用脚本的话，仓库里的 `docker-compose.yml` 可以直接用
+（把 `build:` 段注释掉走预构建镜像，或保留它本地构建）：
 
 ```bash
-docker compose exec panel node -e "process.stdout.write('')"  # 确认存活
+cp .env.example .env   # 填好 MASTER_KEY / SESSION_SECRET / ADMIN_PASSWORD
+docker compose up -d
+```
+
+数据在 `tgs-data` 卷里的 `app.db` 一个文件。备份：
+
+```bash
 docker run --rm -v tgs-data:/data -v "$PWD:/backup" alpine \
   cp /data/app.db /backup/app-$(date +%F).db
 ```
