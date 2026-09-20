@@ -18,6 +18,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 部署脚本语法检查
+        run: |
+          bash -n scripts/deploy.sh
+          bash -n scripts/test-deploy.sh
+          bash -n scripts/test-migration-docker.sh
+      - name: 部署、迁移与回滚回归测试
+        run: bash scripts/test-deploy.sh scripts/deploy.sh
+
   # ── 前端：类型检查与构建 ────────────────────────────────────
   web:
     runs-on: ubuntu-latest
@@ -102,3 +114,6 @@ jobs:
             VERSION=ci-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: 验证真实容器迁移、SQLite 数据保留与失败回滚
+        run: sudo bash scripts/test-migration-docker.sh

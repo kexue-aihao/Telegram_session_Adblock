@@ -30,6 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/kexue-aihao/Telegram_session_Adbloc
 |---|---|
 | 无容器、无数据、无配置 | **首次安装** —— 生成密钥、询问管理员密码、拉镜像、启动 |
 | 三者**任一**存在 | **升级** —— 拉新镜像、重启容器，数据与密钥原样保留 |
+| 旧部署位于 `/opt` 之外 | **迁移并升级** —— 自动识别原容器的配置目录与数据挂载，迁入 `/opt`，原目录保留作备份 |
 
 判断用三者取并集而不是只看容器：容器可能被人手动删了而数据还在，那时若走首次安装路径会重新生成 `MASTER_KEY`，把库里已有的 bot token 全部作废。
 
@@ -53,7 +54,8 @@ curl -fsSL https://raw.githubusercontent.com/kexue-aihao/Telegram_session_Adbloc
 --port PORT          监听端口（默认 8787）
 --bind ADDR          绑定的宿主地址（默认 127.0.0.1，只对本机可见）
 --tag TAG            镜像标签（默认 latest，可指定如 0.2.0）
---dir DIR            数据目录
+--dir DIR            /opt 下的部署目录
+--migrate-from DIR   手动指定旧部署目录（容器已删除或无法自动识别时）
 --admin-password P   首次安装的管理员密码（不传则交互式询问）
 --admin-username U   管理员用户名（默认 admin）
 --yes                不询问，全部用默认值
@@ -62,6 +64,18 @@ curl -fsSL https://raw.githubusercontent.com/kexue-aihao/Telegram_session_Adbloc
 ```
 
 数据目录默认值：检测到 1Panel 时用 `/opt/1panel/apps/telegram-session-adblock`，否则用 `/opt/tgs`。
+
+已经在 `/opt` 下的实例沿用原目录。`.env`、`docker-compose.yml`、`.deploy-state` 和 `data/` 都位于部署目录中；从任何工作目录执行一键命令，都会优先识别现有容器的部署位置。
+
+**旧目录在其他位置时，同一条一键命令会自动迁移。** 脚本先拉取镜像，再停止原容器，复制并校验配置和完整数据目录（包括 SQLite 的 WAL/SHM），随后在新目录启动服务。密钥、管理员密码、宿主端口和绑定地址保留；新服务未能通过健康检查时，脚本恢复原容器。原目录保留作备份，目标目录非空时会停止迁移，避免覆盖另一份数据。
+
+容器已经删除、无法自动定位旧配置时，显式指定来源；也可用 `--dir` 选择 `/opt` 下的新位置：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kexue-aihao/Telegram_session_Adblock/master/scripts/deploy.sh | sudo bash -s -- --migrate-from /root/tgs --dir /opt/tgs
+```
+
+旧命令里的 `--dir /root/tgs` 在该目录已有部署时也会被当作迁移来源。迁移成功后旧目录中的 `.migrated-to` 指向当前目录，重复执行旧命令会使用新数据。迁移期间服务会短暂中断；无法识别的旧目录需要提供 `--migrate-from`，脚本不会搜索整块磁盘。
 
 重复执行本脚本是安全的。
 
@@ -457,4 +471,4 @@ bash scripts/test-deploy.sh scripts/deploy.sh
 里走完一遍」同样需要真 token 才能验。
 
 已验证的是：单元测试（69 个用例，含 ReDoS 免疫与 UTF-16 偏移）、API 端点、
-规则沙盒、部署脚本的 38 项断言、镜像构建与发版流水线。
+规则沙盒、部署脚本的迁移与回滚测试、真实 Docker 迁移验证、镜像构建与发版流水线。

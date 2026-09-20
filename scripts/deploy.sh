@@ -51,6 +51,8 @@ CONTAINER_NAME="tgs-panel"
 DEFAULT_PORT=8787
 DEFAULT_TAG="latest"
 PANEL_NETWORK="1panel-network"
+OPT_ROOT="/opt"
+DEPLOY_URL="https://raw.githubusercontent.com/kexue-aihao/Telegram_session_Adblock/master/scripts/deploy.sh"
 
 # ══════════════════════════ 输出 ══════════════════════════
 #
@@ -76,6 +78,15 @@ PORT="$DEFAULT_PORT"
 BIND_ADDR="127.0.0.1"
 TAG="$DEFAULT_TAG"
 DATA_DIR=""
+MIGRATE_FROM=""
+MIGRATING=0
+MIGRATION_ACTIVE=0
+MIGRATION_STOPPED=0
+MIGRATION_RENAMED=0
+MIGRATION_PUBLISHED=0
+MIGRATION_STAGE=""
+MIGRATION_PROJECT=""
+HOST_PROJECT=""
 ADMIN_PASSWORD=""
 ADMIN_USERNAME="admin"
 ASSUME_YES=0
@@ -92,7 +103,8 @@ ${B}Telegram 会话中继面板 —— 一键部署 / 升级${R}
   --port PORT          监听端口（默认 $DEFAULT_PORT）
   --bind ADDR          绑定的宿主地址（默认 127.0.0.1，只对本机可见）
   --tag TAG            镜像标签（默认 $DEFAULT_TAG，可指定如 0.1.0）
-  --dir DIR            数据目录（默认自动选择，见下）
+  --dir DIR            /opt 下的部署目录（默认自动选择，见下）
+  --migrate-from DIR   指定旧部署目录（无法自动识别旧容器时使用）
   --admin-password P   首次安装时的管理员密码（不传则交互式询问）
   --admin-username U   管理员用户名（默认 admin）
   --yes                不询问，全部用默认值（用于自动化）
@@ -104,7 +116,8 @@ ${B}Telegram 会话中继面板 —— 一键部署 / 升级${R}
   检测到 1Panel   → /opt/1panel/apps/telegram-session-adblock
   否则            → /opt/tgs
 
-升级时会保留全部数据与密钥。重复执行本脚本是安全的。
+已有 /opt 下的部署沿用原目录；其他位置的旧部署自动迁入默认目录。
+迁移保留数据、密钥和宿主端口，原目录保留作备份。
 EOF
 }
 
@@ -114,6 +127,7 @@ while [ $# -gt 0 ]; do
     --bind)           BIND_ADDR="${2:-}"; shift 2 ;;
     --tag)            TAG="${2:-}"; shift 2 ;;
     --dir)            DATA_DIR="${2:-}"; shift 2 ;;
+    --migrate-from)   MIGRATE_FROM="${2:-}"; shift 2 ;;
     --admin-password) ADMIN_PASSWORD="${2:-}"; shift 2 ;;
     --admin-username) ADMIN_USERNAME="${2:-}"; shift 2 ;;
     --yes|-y)         ASSUME_YES=1; shift ;;
@@ -188,25 +202,240 @@ preflight() {
     die "--port 超出范围：$PORT"
   fi
 
-  # 数据目录的默认值：优先与 1Panel 的应用目录并列，
-  # 这样它的文件管理器与备份功能能覆盖到。
-  if [ -z "$DATA_DIR" ]; then
-    if [ -d /opt/1panel ]; then
-      DATA_DIR="/opt/1panel/apps/telegram-session-adblock"
-      IS_1PANEL=1
-      ok "检测到 1Panel，数据目录将放在它下面"
-    else
-      DATA_DIR="/opt/tgs"
-      IS_1PANEL=0
-    fi
-  else
-    IS_1PANEL=$([ -d /opt/1panel ] && echo 1 || echo 0)
-  fi
+  command -v realpath >/dev/null 2>&1 || die "找不到 realpath，请先安装 coreutils。"
+  command -v flock >/dev/null 2>&1 || die "找不到 flock，请先安装 util-linux。"
+  mkdir -p "$OPT_ROOT"
+  exec 9>"$OPT_ROOT/.tgs-deploy.lock"
+  flock -n 9 || die "另一个部署或迁移正在运行，请等待它完成后重试。"
+  IS_1PANEL=$([ -d "$OPT_ROOT/1panel" ] && echo 1 || echo 0)
+  select_deployment_dir
 
   ok "数据目录：$DATA_DIR"
   ok "监听地址：$BIND_ADDR:$PORT"
 
   STATE_FILE="$DATA_DIR/.deploy-state"
+}
+
+# Resolve physical paths so a symlink under /opt cannot keep live data elsewhere.
+canonical_dir() { realpath -m -- "$1"; }
+under_opt() { case "$1" in "$OPT_ROOT"/*) return 0 ;; *) return 1 ;; esac; }
+has_deployment() { [ -f "$1/.env" ] || [ -f "$1/data/app.db" ]; }
+inspect_field() { docker inspect --format "$1" "$CONTAINER_NAME" 2>/dev/null; }
+resolve_source() {
+  local dir
+  dir="$(canonical_dir "$1")"
+  if [ -f "$dir/.migrated-to" ]; then
+    IFS= read -r dir < "$dir/.migrated-to"
+    dir="$(canonical_dir "$dir")"
+    under_opt "$dir" && has_deployment "$dir" || die "旧目录的迁移目标不存在：$dir；请检查备份。"
+  fi
+  printf '%s\n' "$dir"
+}
+
+select_deployment_dir() {
+  local default_dir="$OPT_ROOT/tgs" source="" working_dir="" mount="" candidate=""
+  local requested="$DATA_DIR"
+  [ "$IS_1PANEL" = "1" ] && default_dir="$OPT_ROOT/1panel/apps/telegram-session-adblock"
+  OLD_CONTAINER=0
+  OLD_RUNNING=false
+  OLD_DATA=""
+
+  if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+    OLD_CONTAINER=1
+    working_dir="$(inspect_field '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}')"
+    [ "$working_dir" = "<no value>" ] && working_dir=""
+    mount="$(inspect_field '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Source}}{{end}}{{end}}')"
+    [ -n "$mount" ] && OLD_DATA="$(canonical_dir "$mount")"
+    OLD_RUNNING="$(inspect_field '{{.State.Running}}')"
+    if [ -n "$working_dir" ] && has_deployment "$working_dir"; then
+      source="$(canonical_dir "$working_dir")"
+    elif [ -n "$OLD_DATA" ] && has_deployment "$(dirname "$OLD_DATA")"; then
+      source="$(canonical_dir "$(dirname "$OLD_DATA")")"
+    fi
+  fi
+
+  if [ -n "$MIGRATE_FROM" ]; then
+    candidate="$(resolve_source "$MIGRATE_FROM")"
+    if [ -n "$source" ] && [ "$candidate" != "$source" ]; then
+      die "--migrate-from 与现有容器的部署目录不一致：$source"
+    fi
+    source="$candidate"
+  elif [ -n "$requested" ]; then
+    requested="$(resolve_source "$requested")"
+    # Accept an old --dir invocation as a source hint, but never install outside /opt.
+    if ! under_opt "$requested" && [ "$ACTION" = "deploy" ]; then
+      has_deployment "$requested" || die "新部署目录必须位于 $OPT_ROOT 下。迁移旧目录请用 --migrate-from。"
+      if [ -n "$source" ] && [ "$source" != "$requested" ]; then
+        die "--dir 与现有容器的部署目录不一致：$source"
+      fi
+      source="$requested"
+      requested=""
+    elif [ -z "$source" ] && has_deployment "$requested"; then
+      source="$requested"
+    fi
+  fi
+
+  if [ "$OLD_CONTAINER" = "1" ] && [ -z "$source" ]; then
+    die "已有容器，但无法定位原 .env。请用 --migrate-from 指定旧部署目录，脚本不会重新生成密钥。"
+  fi
+  if [ "$OLD_CONTAINER" = "1" ] && [ -z "$OLD_DATA" ]; then
+    die "无法识别原容器的 /data 挂载，已停止，避免复制错误的数据库。"
+  fi
+  if [ -z "$source" ]; then
+    for candidate in "$OPT_ROOT/tgs" "$OPT_ROOT/1panel/apps/telegram-session-adblock"; do
+      if has_deployment "$candidate"; then
+        [ -z "$source" ] || die "发现多个部署目录，请用 --dir 或 --migrate-from 明确选择。"
+        source="$(canonical_dir "$candidate")"
+      fi
+    done
+    if [ -z "$source" ] && [ -f "$PWD/docker-compose.yml" ] && has_deployment "$PWD"; then
+      source="$(canonical_dir "$PWD")"
+    fi
+  fi
+
+  # A retained backup points to the active installation on subsequent invocations.
+  if [ "$OLD_CONTAINER" = "0" ] && [ -n "$source" ] && [ -f "$source/.migrated-to" ]; then
+    source="$(resolve_source "$source")"
+  fi
+
+  if [ "$ACTION" != "deploy" ]; then
+    DATA_DIR="${requested:-${source:-$default_dir}}"
+    DATA_DIR="$(canonical_dir "$DATA_DIR")"
+    case "$DATA_DIR" in /|"$OPT_ROOT") die "不能把系统根目录作为部署目录。" ;; esac
+    return
+  fi
+
+  DATA_DIR="${requested:-$default_dir}"
+  if [ -z "$requested" ] && [ -n "$source" ] && under_opt "$source"; then
+    DATA_DIR="$source"
+  fi
+  DATA_DIR="$(canonical_dir "$DATA_DIR")"
+  under_opt "$DATA_DIR" || die "部署目录必须位于 $OPT_ROOT 下，且不能通过符号链接指向外部：$DATA_DIR"
+
+  if [ -n "$source" ]; then
+    [ -f "$source/.env" ] || die "$source/.env 不存在，请先恢复原配置；不能为已有数据重新生成密钥。"
+    OLD_DATA="${OLD_DATA:-$source/data}"
+    OLD_DATA="$(canonical_dir "$OLD_DATA")"
+    if [ "$source" != "$DATA_DIR" ]; then
+      [ -d "$OLD_DATA" ] || die "找不到原数据目录：$OLD_DATA"
+      case "$DATA_DIR/" in "$source/"*|"$OLD_DATA/"*) die "目标目录不能位于旧部署或旧数据目录内部。" ;; esac
+      case "$source/" in "$DATA_DIR/"*) die "目标目录不能是旧部署目录的父目录。" ;; esac
+      if [ -e "$DATA_DIR" ] && { [ ! -d "$DATA_DIR" ] || [ -n "$(find "$DATA_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]; }; then
+        die "迁移目标 $DATA_DIR 非空，已停止，避免覆盖另一份配置或数据库。"
+      fi
+      MIGRATING=1
+      MIGRATE_FROM="$source"
+      info "将迁移：$MIGRATE_FROM → $DATA_DIR（原目录保留）"
+    elif [ "$OLD_DATA" != "$(canonical_dir "$DATA_DIR/data")" ]; then
+      die "当前容器使用独立数据挂载 $OLD_DATA。请用 --dir 指定另一个 $OPT_ROOT 下的空目录完成迁移。"
+    fi
+  fi
+}
+
+# Use a distinct Compose project while retaining the stopped old container for rollback.
+compose() {
+  local project="${MIGRATION_PROJECT:-$HOST_PROJECT}"
+  if [ -n "$project" ]; then
+    $COMPOSE -p "$project" -f "$DATA_DIR/docker-compose.yml" "$@"
+  else
+    $COMPOSE -f "$DATA_DIR/docker-compose.yml" "$@"
+  fi
+}
+
+migration_exit() {
+  local status=$?
+  [ "$MIGRATION_ACTIVE" = "1" ] || return "$status"
+  trap - EXIT INT TERM
+  warn "迁移未完成，正在恢复原部署。"
+  if [ "$MIGRATION_RENAMED" = "1" ]; then
+    compose down --remove-orphans >/dev/null 2>&1 || true
+    if ! docker rename "$MIGRATION_CONTAINER" "$CONTAINER_NAME"; then
+      warn "恢复容器名称失败。原容器保留为 $MIGRATION_CONTAINER，请检查 Docker 状态。"
+      exit 1
+    fi
+  fi
+  if [ "$OLD_CONTAINER" = "0" ] && [ "$MIGRATION_PUBLISHED" = "1" ]; then
+    compose down --remove-orphans >/dev/null 2>&1 || true
+  fi
+  if [ "$MIGRATION_STOPPED" = "1" ] && [ "$OLD_RUNNING" = "true" ]; then
+    docker start "$CONTAINER_NAME" >/dev/null || warn "原容器启动失败，请运行 docker start $CONTAINER_NAME 检查。"
+  fi
+  if [ "$MIGRATION_PUBLISHED" = "1" ]; then
+    local failed_dir="${DATA_DIR}.failed.$(date +%Y%m%d-%H%M%S)-$$"
+    mv -- "$DATA_DIR" "$failed_dir" || true
+    warn "本次迁移副本保留在 $failed_dir；原数据仍在 $MIGRATE_FROM。"
+  elif [ -n "$MIGRATION_STAGE" ]; then
+    warn "未完成的复制保留在 $MIGRATION_STAGE；原数据仍在 $MIGRATE_FROM。"
+  fi
+  [ "$status" -ne 0 ] || status=1
+  exit "$status"
+}
+
+migrate_deployment() {
+  step "迁移部署目录"
+  # Download before stopping the service; copy SQLite and its WAL only after shutdown.
+  docker pull "${IMAGE_REPO}:${TAG}" || die "镜像拉取失败，原部署未改动。"
+  MIGRATION_CONTAINER="${CONTAINER_NAME}-migration-$(date +%s)-$$"
+  MIGRATION_PROJECT="tgs-migration-$(date +%s)-$$"
+  MIGRATION_ACTIVE=1
+  trap migration_exit EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [ "$OLD_CONTAINER" = "1" ]; then
+    MIGRATION_STOPPED=1
+    docker stop --time 120 "$CONTAINER_NAME" >/dev/null
+    [ "$(inspect_field '{{.State.Running}}')" = "false" ] || die "原容器尚未停止，不能复制正在写入的数据库。"
+  fi
+
+  mkdir -p -- "$(dirname "$DATA_DIR")"
+  MIGRATION_STAGE="$(mktemp -d "${DATA_DIR}.migrate.XXXXXX")"
+  chmod 700 "$MIGRATION_STAGE"
+  local file
+  for file in .env .deploy-state docker-compose.yml; do
+    if [ -f "$MIGRATE_FROM/$file" ]; then
+      cp -pL -- "$MIGRATE_FROM/$file" "$MIGRATION_STAGE/"
+    fi
+  done
+  for file in "$MIGRATE_FROM"/.env.bak.*; do
+    [ ! -f "$file" ] || cp -pL -- "$file" "$MIGRATION_STAGE/"
+  done
+  mkdir "$MIGRATION_STAGE/data"
+  cp -aL -- "$OLD_DATA/." "$MIGRATION_STAGE/data/"
+  cmp -s "$MIGRATE_FROM/.env" "$MIGRATION_STAGE/.env" || die "配置复制校验失败。"
+  diff -qr -- "$OLD_DATA" "$MIGRATION_STAGE/data" >/dev/null || die "数据复制校验失败，原部署将恢复。"
+  [ ! -d "$DATA_DIR" ] || rmdir -- "$DATA_DIR"
+  mv -- "$MIGRATION_STAGE" "$DATA_DIR"
+  MIGRATION_PUBLISHED=1
+  STATE_FILE="$DATA_DIR/.deploy-state"
+
+  # Preserve a non-default published port even if the old script left no state file.
+  if [ ! -f "$STATE_FILE" ] && [ "$OLD_CONTAINER" = "1" ]; then
+    local binding old_port old_bind
+    binding="$(inspect_field '{{range (index .NetworkSettings.Ports "8787/tcp")}}{{.HostIp}}|{{.HostPort}}{{println}}{{end}}')"
+    binding="${binding%%$'\n'*}"
+    IFS='|' read -r old_bind old_port <<< "$binding"
+    if [ -n "$old_port" ]; then
+      [ "$PORT" != "$DEFAULT_PORT" ] || PORT="$old_port"
+      [ "$BIND_ADDR" != "127.0.0.1" ] || BIND_ADDR="${old_bind:-127.0.0.1}"
+    fi
+    write_state
+  fi
+  if [ "$OLD_CONTAINER" = "1" ]; then
+    docker rename "$CONTAINER_NAME" "$MIGRATION_CONTAINER"
+    MIGRATION_RENAMED=1
+  fi
+  ok "配置和数据已复制并校验，原目录保留在 $MIGRATE_FROM"
+}
+
+finish_migration() {
+  [ "$MIGRATING" = "1" ] || return 0
+  MIGRATION_ACTIVE=0
+  trap - EXIT INT TERM
+  if [ "$MIGRATION_RENAMED" = "1" ]; then
+    docker rm "$MIGRATION_CONTAINER" >/dev/null || warn "旧容器 $MIGRATION_CONTAINER 未能移除，可稍后清理。"
+  fi
+  printf '%s\n' "$DATA_DIR" > "$MIGRATE_FROM/.migrated-to"
+  ok "迁移完成：$DATA_DIR；原目录 $MIGRATE_FROM 保留作备份。"
 }
 
 # ══════════════════════════ 安装状态检测 ══════════════════════════
@@ -348,6 +577,9 @@ EOF
     sed -i.tmp "s|^PORT=.*|PORT=8787|" "$env_file" && rm -f "$env_file.tmp"
   fi
 
+  if [ "$MIGRATING" = "1" ]; then
+    HOST_PROJECT="$MIGRATION_PROJECT"
+  fi
   write_state
 }
 
@@ -365,6 +597,7 @@ HOST_PORT=${PORT}
 HOST_BIND=${BIND_ADDR}
 HOST_TAG=${TAG}
 HOST_USERNAME=${ADMIN_USERNAME}
+HOST_PROJECT=${HOST_PROJECT}
 DEPLOYED_AT=$(date -Iseconds)
 EOF
   chmod 600 "$STATE_FILE"
@@ -501,7 +734,7 @@ pull_image() {
   # 真正执行子命令时才暴露，而 `pull` 失败时的报错看起来很像网络问题。
   # 单独校验能让「配置写错了」和「网线断了」在提示上就分开 ——
   # 排查方向不同，混在一起会让人先去查网络。
-  if ! $COMPOSE -f "$DATA_DIR/docker-compose.yml" config -q 2>/tmp/tgs-compose-err; then
+  if ! compose config -q 2>/tmp/tgs-compose-err; then
     warn "生成的 compose 文件没有通过校验："
     sed 's/^/    /' /tmp/tgs-compose-err >&2
     rm -f /tmp/tgs-compose-err
@@ -509,14 +742,14 @@ pull_image() {
     https://github.com/kexue-aihao/Telegram_session_Adblock/issues
 
     临时绕过：文件在 $DATA_DIR/docker-compose.yml，可手工修正后执行
-    cd $DATA_DIR && $COMPOSE up -d"
+    请重新运行一键部署命令，或使用完成提示中的 Compose 项目参数手动启动。"
   fi
   rm -f /tmp/tgs-compose-err
   ok "配置文件校验通过"
 
   info "${IMAGE_REPO}:${TAG}"
 
-  if ! $COMPOSE -f "$DATA_DIR/docker-compose.yml" pull; then
+  if ! compose pull; then
     die "镜像拉取失败。常见原因：
 
     · 标签不存在 —— 确认 '$TAG' 有效：
@@ -532,11 +765,13 @@ start_container() {
 
   # down 只移除容器，不动 ./data 目录 ——
   # 那里有 SQLite 库（含 bot token 与全部中继消息）。
-  $COMPOSE -f "$DATA_DIR/docker-compose.yml" down --remove-orphans >/dev/null 2>&1 || true
+  if [ "$MIGRATING" != "1" ]; then
+    compose down --remove-orphans >/dev/null 2>&1 || true
+  fi
 
-  if ! $COMPOSE -f "$DATA_DIR/docker-compose.yml" up -d; then
+  if ! compose up -d; then
     die "容器启动失败。用下面的命令看详细原因：
-    cd $DATA_DIR && $COMPOSE logs --tail 50"
+    docker logs --tail 50 $CONTAINER_NAME"
   fi
   ok "容器已启动"
 }
@@ -556,7 +791,7 @@ wait_healthy() {
       unhealthy)
         printf '\n'
         local logs
-        logs="$($COMPOSE -f "$DATA_DIR/docker-compose.yml" logs --tail 40 2>&1)"
+        logs="$(compose logs --tail 40 2>&1)"
 
         warn "容器报告不健康。最近日志："
         printf '%s\n' "$logs" | sed 's/^/    /' >&2
@@ -572,12 +807,12 @@ wait_healthy() {
             warn "看起来是数据目录不可写。容器以非 root 用户（${CONTAINER_UID}）运行，"
             warn "而目录挂载用的是宿主目录的属主。执行："
             warn "  sudo chown -R ${CONTAINER_UID}:${CONTAINER_UID} $DATA_DIR/data"
-            warn "  cd $DATA_DIR && $COMPOSE restart"
+            warn "  docker restart $CONTAINER_NAME"
             ;;
           *"环境变量校验失败"*|*"ADMIN_PASSWORD"*)
             warn "看起来是环境变量不合规。"
             warn "改 $DATA_DIR/.env 里对应的那一项后重启："
-            warn "  cd $DATA_DIR && $COMPOSE up -d --force-recreate"
+            warn "  curl -fsSL $DEPLOY_URL | sudo bash -s -- --dir \"$DATA_DIR\""
             ;;
           *"无法解密"*|*"MASTER_KEY"*)
             warn "看起来 MASTER_KEY 与库里已有的密文对不上。"
@@ -590,7 +825,7 @@ wait_healthy() {
             ;;
         esac
 
-        die "启动失败。完整日志：cd $DATA_DIR && $COMPOSE logs"
+        die "启动失败。完整日志：docker logs $CONTAINER_NAME"
         ;;
     esac
     printf '  %s…（%d/30，当前 %s）\r' "$DIM" "$i" "$health"
@@ -599,7 +834,7 @@ wait_healthy() {
 
   printf '\n'
   warn "等待超时。容器可能仍在启动中，用下面的命令查看："
-  warn "  cd $DATA_DIR && $COMPOSE logs -f"
+  warn "  docker logs -f $CONTAINER_NAME"
 }
 
 # ══════════════════════════ 卸载 ══════════════════════════
@@ -608,7 +843,7 @@ do_uninstall() {
   step "卸载容器"
   [ -d "$DATA_DIR" ] || die "找不到 $DATA_DIR。"
 
-  $COMPOSE -f "$DATA_DIR/docker-compose.yml" down --remove-orphans 2>/dev/null || \
+  compose down --remove-orphans 2>/dev/null || \
     docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
 
   ok "容器已移除"
@@ -631,7 +866,7 @@ do_purge() {
     exit 0
   fi
 
-  $COMPOSE -f "$DATA_DIR/docker-compose.yml" down --remove-orphans 2>/dev/null || \
+  compose down --remove-orphans 2>/dev/null || \
     docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
 
   rm -rf "$DATA_DIR"
@@ -641,7 +876,8 @@ do_purge() {
 # ══════════════════════════ 完成提示 ══════════════════════════
 
 print_summary() {
-  local host_ip
+  local host_ip compose_cmd="$COMPOSE"
+  [ -z "$HOST_PROJECT" ] || compose_cmd="$COMPOSE -p $HOST_PROJECT"
   host_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
   [ -n "$host_ip" ] || host_ip="<服务器IP>"
 
@@ -695,10 +931,10 @@ $([ "$IS_1PANEL" = "1" ] && echo "
 
 ${B}── 常用操作 ──────────────────────────────────${R}
 
-  看日志    cd ${DATA_DIR} && $COMPOSE logs -f
-  重启      cd ${DATA_DIR} && $COMPOSE restart
-  升级      sudo bash $0
-  卸载      sudo bash $0 --uninstall
+  看日志    cd "${DATA_DIR}" && $compose_cmd logs -f
+  重启      cd "${DATA_DIR}" && $compose_cmd restart
+  升级      curl -fsSL $DEPLOY_URL | sudo bash -s -- --dir "$DATA_DIR"
+  卸载      curl -fsSL $DEPLOY_URL | sudo bash -s -- --dir "$DATA_DIR" --uninstall
 
 ${B}── 接下来 ────────────────────────────────────${R}
 
@@ -718,9 +954,14 @@ main() {
 
   preflight
 
+  if [ "$ACTION" != "deploy" ] && [ -f "$STATE_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$STATE_FILE"
+  fi
   if [ "$ACTION" = "uninstall" ]; then do_uninstall; exit 0; fi
   if [ "$ACTION" = "purge" ]; then do_purge; exit 0; fi
 
+  if [ "$MIGRATING" = "1" ]; then migrate_deployment; fi
   detect_state
   if [ "$MODE" = "upgrade" ]; then
     step "检测到已安装"
@@ -741,7 +982,10 @@ main() {
   pull_image
   start_container
   wait_healthy
+  finish_migration
   print_summary
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi
