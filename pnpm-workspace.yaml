@@ -1,0 +1,15 @@
+packages:
+  - 'packages/*'
+
+# 本项目的硬性约束：不允许任何需要 node-gyp 编译的依赖。
+# Windows 上没有 Visual Studio Build Tools，一旦引入编译型依赖，
+# 开发与 Docker 构建都会直接失败。所有原生依赖必须自带预编译产物。
+#
+# allowBuilds 列出允许执行 install 脚本的包。esbuild 的 install 脚本只是把
+# 已经随平台包（@esbuild/win32-x64 等）下发的预编译二进制链接到位，不涉及编译；
+# 拒绝它会导致 vite / drizzle-kit 找不到可执行文件。
+allowBuilds:
+  esbuild: true
+
+minimumReleaseAgeExclude:
+  - '@types/node@26.6.2'

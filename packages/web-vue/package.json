@@ -1,0 +1,25 @@
+{
+  "name": "@tgs/web-vue",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:only": "vite build",
+    "preview": "vite preview",
+    "typecheck": "vite build --mode development"
+  },
+  "dependencies": {
+    "pinia": "^4.0.3",
+    "vue": "^3.5.43",
+    "vue-router": "^5.3.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@vitejs/plugin-vue": "^6.0.9",
+    "tailwindcss": "4.3.3",
+    "typescript": "7.0.2",
+    "vite": "8.3.0"
+  }
+}

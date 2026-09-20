@@ -1,0 +1,22 @@
+{
+  "name": "telegram-session-adblock",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Telegram 话题式会话管理器 + 广告审计面板",
+  "type": "module",
+  "packageManager": "pnpm@12.4.2",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @tgs/web-vue dev",
+    "dev:server": "go run ./cmd/tgs",
+    "build": "pnpm --filter @tgs/web-vue build",
+    "build:server": "go build -o tgs ./cmd/tgs",
+    "start": "pnpm --filter @tgs/web-vue preview",
+    "typecheck": "pnpm --filter @tgs/web-vue build"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,233 @@
+name: Release
+
+# 发版流程。触发方式是推一个 v 开头的 tag：
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# 做三件事：
+#   1. 构建 linux/amd64 与 linux/arm64 的多架构镜像并推到 GHCR；
+#   2. 为三个平台构建独立二进制（含前端产物），打包成 tar.gz / zip；
+#   3. 创建 GitHub Release 并附上这些产物。
+#
+# 前两件并行跑，Release 等二进制就绪后再创建 —— 否则会先出现一个
+# 空 Release，用户点进去什么都没有。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要构建的 tag（例如 v0.2.0）'
+        required: true
+
+permissions:
+  contents: write # 创建 Release
+  packages: write # 推 GHCR
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ── 容器镜像：多架构 ─────────────────────────────────────────
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 计算镜像标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # 仓库名转小写 —— GHCR 不接受大写字母，而 GitHub 用户名可以含大写
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ !contains(github.ref, '-') }}
+            type=sha,prefix=sha-
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 版本号注入二进制，启动日志与 /api/health 都会报告它
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── 独立二进制：不依赖 Docker 的部署方式 ─────────────────────
+  binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # 二进制要自带前端产物 —— 否则用户拿到一个只会返回 JSON 的服务
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @tgs/web-vue build
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/server-go/go.mod
+          cache-dependency-path: packages/server-go/go.sum
+
+      - name: 解析版本号
+        id: ver
+        run: |
+          ref="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+
+      - name: 交叉编译
+        env:
+          CGO_ENABLED: 0
+          VERSION: ${{ steps.ver.outputs.version }}
+        working-directory: packages/server-go
+        run: |
+          set -euo pipefail
+
+          # 三个目标平台。
+          # 全部用 CGO_ENABLED=0：现代 Go 的 SQLite 驱动是纯 Go 的，
+          # 所以交叉编译不需要任何 C 工具链 —— 这是选 modernc.org/sqlite
+          # 而不是 mattn/go-sqlite3 换来的直接好处。
+          targets="linux/amd64 linux/arm64 windows/amd64"
+
+          for target in $targets; do
+            GOOS="${target%%/*}"
+            GOARCH="${target##*/}"
+
+            out="tgs-${GOOS}-${GOARCH}"
+            # 用显式 if 而不是 `[ ... ] && out=...`：
+            # 后者在条件为假时整条语句返回 1，而它与 set -e 的交互
+            # （「AND-OR 列表中非末尾命令的失败被忽略」）是个容易记错的细节。
+            # 显式分支没有这层歧义。
+            if [ "$GOOS" = "windows" ]; then
+              out="${out}.exe"
+            fi
+
+            echo "── 构建 $target"
+            go build -trimpath \
+              -ldflags "-s -w -X github.com/tgs/server/internal/api.Version=${VERSION}" \
+              -o "/tmp/dist/${out}" ./cmd/tgs
+          done
+
+      - name: 打包
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p /tmp/pkg
+          cd /tmp/dist
+
+          for target in linux-amd64 linux-arm64; do
+            dirname="tgs-${VERSION}-${target}"
+            mkdir -p "/tmp/pkg/${dirname}"
+            cp "tgs-${target}" "/tmp/pkg/${dirname}/tgs"
+            cp -r "$GITHUB_WORKSPACE/packages/web-vue/dist" "/tmp/pkg/${dirname}/web-dist"
+            cp "$GITHUB_WORKSPACE/.env.example" "/tmp/pkg/${dirname}/.env.example"
+            tar -C /tmp/pkg -czf "/tmp/pkg/${dirname}.tar.gz" "${dirname}"
+            rm -rf "/tmp/pkg/${dirname}"
+          done
+
+          # Windows 用 zip：tar.gz 在资源管理器里打不开，
+          # 而拿独立二进制部署到 Windows 的人多半不会用命令行解压。
+          dirname="tgs-${VERSION}-windows-amd64"
+          mkdir -p "/tmp/pkg/${dirname}"
+          cp "tgs-windows-amd64.exe" "/tmp/pkg/${dirname}/tgs.exe"
+          cp -r "$GITHUB_WORKSPACE/packages/web-vue/dist" "/tmp/pkg/${dirname}/web-dist"
+          cp "$GITHUB_WORKSPACE/.env.example" "/tmp/pkg/${dirname}/.env.example"
+          (cd /tmp/pkg && zip -qr "${dirname}.zip" "${dirname}")
+          rm -rf "/tmp/pkg/${dirname}"
+
+          ls -lh /tmp/pkg
+
+      - name: 生成校验和
+        run: |
+          cd /tmp/pkg
+          # 校验和让用户能确认下载的产物没有被中途篡改
+          sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: /tmp/pkg/*
+          if-no-files-found: error
+
+  # ── 发布 ────────────────────────────────────────────────────
+  release:
+    needs: [binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: dist
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: dist/*
+          generate_release_notes: true
+          draft: false
+          body: |
+            ## 容器镜像
+
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ```
+
+            支持 `linux/amd64` 与 `linux/arm64`。
+
+            ## 独立二进制
+
+            下载对应平台的压缩包，解压后：
+
+            ```bash
+            cp .env.example .env
+            # 按 .env 里的注释生成 MASTER_KEY 与 SESSION_SECRET
+            ./tgs
+            ```
+
+            二进制是静态链接的（`CGO_ENABLED=0`），不依赖系统库，
+            时区数据库也已编入 —— 可以直接扔进任何 Linux 发行版运行。
+
+            ## 校验
+
+            下载后可用 `SHA256SUMS.txt` 核对完整性：
+
+            ```bash
+            sha256sum -c SHA256SUMS.txt
+            ```

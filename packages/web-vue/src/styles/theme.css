@@ -1,0 +1,524 @@
+@import 'tailwindcss';
+
+/**
+ * 设计令牌与基础样式。
+ *
+ * ── 关于「磨砂」的一个关键认知 ──────────────────────────────
+ *
+ * backdrop-filter 本身不会让界面变高级。把一块半透明面板盖在纯色背景上，
+ * 它看起来只是一块「稍微亮一点的板子」——因为背后根本没有东西可以模糊。
+ *
+ * 磨砂要读得出来，必须满足两个条件：
+ *   1. 背后有**低对比度但有色相差异**的内容（环境光晕）；
+ *   2. 那层内容在缓慢移动 —— 静止的模糊与一张图片无异。
+ *
+ * 所以这个主题里有一个 `.ambient` 层：三团非常大的径向渐变，
+ * 以 60~90 秒的周期极缓慢地漂移。它们几乎看不见，但正是它们
+ * 让侧边栏与命令面板的模糊显得「是玻璃」而不是「是灰色」。
+ *
+ * ── 关于性能的一条硬约束 ──────────────────────────────────
+ *
+ * backdrop-filter 会让浏览器为每个被模糊的表面做一次独立的合成。
+ * 因此它**只用在浮在内容之上的表面**：侧边栏、顶栏、命令面板、
+ * 抽屉、弹窗、Toast。内容卡片一律用实色 —— 给几十张卡片都加上模糊，
+ * 滚动时会直接掉到 30fps，那是「看起来高级但用起来廉价」。
+ */
+
+@theme {
+  /* ── 表面：三级明度 ────────────────────────────────────────
+     层级靠**明度差**建立，而不是靠粗边框。纯黑（#000）在 OLED 上有
+     「黑洞感」，卡片与背景分不清层次，所以底色带一点点蓝紫倾向。 */
+  --color-bg-0: #07080b;
+  --color-bg-1: #0c0e13;
+  --color-bg-2: #11141b;
+  --color-bg-3: #171b24;
+  --color-bg-4: #1e2330;
+
+  /* 悬浮与选中态：半透明白叠在任意一层上都成立 */
+  --color-hover: rgb(255 255 255 / 0.04);
+  --color-active: rgb(255 255 255 / 0.07);
+
+  /* ── 描边：三档，越靠上越亮，模拟顶光 ──────────────────────── */
+  --color-line-faint: rgb(255 255 255 / 0.05);
+  --color-line: rgb(255 255 255 / 0.09);
+  --color-line-strong: rgb(255 255 255 / 0.16);
+
+  /* 卡片顶部的一像素内高光 —— 暗色质感的关键就在这一条 */
+  --color-highlight: rgb(255 255 255 / 0.07);
+
+  /* ── 文字 ──────────────────────────────────────────────── */
+  --color-ink: #e9ebf2;
+  --color-ink-muted: #9aa1b2;
+  --color-ink-subtle: #626a7c;
+  --color-ink-faint: #414958;
+
+  /* ── 品牌与语义色 ──────────────────────────────────────────
+     用 oklch：它在感知上均匀，因此调亮调暗时色相不会偏移 ——
+     用 hex 把蓝色调暗会偏紫，调亮会偏青。 */
+  --color-accent: oklch(0.70 0.16 250);
+  --color-accent-bright: oklch(0.78 0.16 250);
+  --color-accent-deep: oklch(0.55 0.18 262);
+  --color-accent-soft: oklch(0.70 0.16 250 / 0.13);
+
+  --color-violet: oklch(0.66 0.20 295);
+  --color-success: oklch(0.74 0.16 155);
+  --color-success-soft: oklch(0.74 0.16 155 / 0.13);
+  --color-warn: oklch(0.80 0.14 80);
+  --color-warn-soft: oklch(0.80 0.14 80 / 0.13);
+  --color-danger: oklch(0.68 0.20 25);
+  --color-danger-soft: oklch(0.68 0.20 25 / 0.13);
+
+  /* ── 环境光晕的取值（暗色）──────────────────────────────────
+     高明度 + 高彩度：近黑底上只有饱和的颜色才有「光」的感觉。
+     三团的色相分别是品牌蓝 / 蓝紫 / 紫罗兰，再加一团青色点缀 ——
+     三个以上光斑才会读成「空间」，两个容易看成一条对角线。 */
+  --orb-a: oklch(0.70 0.21 258);
+  --orb-b: oklch(0.66 0.21 280);
+  --orb-c: oklch(0.64 0.24 296);
+  --orb-d: oklch(0.76 0.14 200);
+  --ambient-opacity: 0.5;
+  --orb-blur: 72px;
+  /* 玻璃层：暗色下要比背景更透，模糊才显出来 */
+  --glass-base: var(--color-bg-1);
+  --glass-alpha: 52%;
+  --glass-deep-base: var(--color-bg-2);
+  --glass-deep-alpha: 66%;
+  /* 光标聚光的颜色。暗色下用白提亮；浅色下白色在白卡上不可见，改用品牌蓝 */
+  --spot-color: rgb(255 255 255 / 0.08);
+
+  /* ── 字体 ──────────────────────────────────────────────────
+     字重刻意偏重：细字重在暗色背景上会「发虚」，
+     是廉价感最直接的来源之一。 */
+  --font-sans:
+    'Inter var', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  --font-mono:
+    'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+
+  /* 字阶 11/12/13/14/16/20/28/40 */
+  --text-2xs: 11px;
+  --text-2xs--line-height: 16px;
+  --text-xs: 12px;
+  --text-xs--line-height: 18px;
+  --text-sm: 13px;
+  --text-sm--line-height: 20px;
+  --text-base: 14px;
+  --text-base--line-height: 22px;
+  --text-lg: 16px;
+  --text-lg--line-height: 24px;
+  --text-xl: 20px;
+  --text-xl--line-height: 28px;
+  --text-2xl: 28px;
+  --text-2xl--line-height: 34px;
+  --text-3xl: 40px;
+  --text-3xl--line-height: 46px;
+
+  /* ── 圆角 8/12/16/24 ─────────────────────────────────────── */
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+  --radius-3xl: 24px;
+
+  /* ── 动效时长：统一从这里取，禁止散落的魔法数字 ────────────────
+     一个 150ms 的 hover 配一个 500ms 的展开，整体就会显得笨重，
+     而这类不一致是「廉价感」最主要的来源。 */
+  --duration-micro: 120ms;
+  --duration-state: 200ms;
+  --duration-layout: 320ms;
+  --duration-page: 480ms;
+
+  /* ── 缓动 ────────────────────────────────────────────────── */
+  --ease-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-state: cubic-bezier(0.4, 0, 0.2, 1);
+  /* 略微过冲，用于「落下」的动作 */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/**
+ * 浅色主题。
+ *
+ * 只覆盖颜色令牌 —— 间距、圆角、动效与主题无关，不该跟着变。
+ * `html.light` 而不是 `:root.light`：index.html 上的内联脚本在 Vue
+ * 挂载前就切换这个 class，选择器必须能匹配到它。
+ */
+html.light {
+  --color-bg-0: #eceff5;
+  --color-bg-1: #ffffff;
+  --color-bg-2: #ffffff;
+  --color-bg-3: #f2f4f8;
+  --color-bg-4: #e4e8ef;
+
+  --color-hover: rgb(12 16 24 / 0.035);
+  --color-active: rgb(12 16 24 / 0.06);
+
+  --color-line-faint: rgb(12 16 24 / 0.08);
+  --color-line: rgb(12 16 24 / 0.13);
+  --color-line-strong: rgb(12 16 24 / 0.18);
+  --color-highlight: rgb(255 255 255 / 0.9);
+
+  --color-ink: #12151c;
+  --color-ink-muted: #596172;
+  --color-ink-subtle: #858da0;
+  --color-ink-faint: #b4bac7;
+
+  /* ── 环境光晕的取值（浅色）──────────────────────────────────
+     浅色的光斑比暗色难调得多，这里试了三轮：
+
+     第一轮：直接沿用暗色的高饱和光斑（L≈0.70 C≈0.21）。
+             结果在浅底上是两团紫粉色污渍，像渲染故障。
+
+     第二轮：矫枉过正压到 L≈0.94 C≈0.04。
+             结果从「脏」变成「完全看不见」—— 白上加白等于没加。
+
+     第三轮（当前）：L≈0.86~0.90、C≈0.05~0.07。
+             这个区间才既透得出来、又不至于读成污渍。
+
+     另一个前提是**背景必须先有底色**。原来底色是 #f6f7f9（接近纯白），
+     白卡片压在上面分不出层次，光斑也无处附着；
+     把底下沉到 #eceff5 之后，卡片与玻璃才同时立住。
+     这两件事必须一起调，单独调任一个都会得出错误结论。 */
+  --orb-a: oklch(0.86 0.065 258);
+  --orb-b: oklch(0.88 0.058 280);
+  --orb-c: oklch(0.87 0.070 296);
+  --orb-d: oklch(0.90 0.048 200);
+  --ambient-opacity: 0.72;
+  /* 更小的模糊半径：浅色下光斑需要有形状，不然会糊成一片灰 */
+  --orb-blur: 100px;
+
+  /* 玻璃层：浅色下要比背景**更白**，而不是更透。
+     浅底上再透明也只是露出背景，反而不像一块独立的表面。
+     68% 是配合上面那个底色定的 —— 底色越深，这个值可以越高。 */
+  --glass-base: #ffffff;
+  --glass-alpha: 68%;
+  --glass-deep-base: #ffffff;
+  --glass-deep-alpha: 88%;
+  /* 浅色下的投影要克制：白底上的重投影只会显脏 */
+  --glass-shadow: rgb(15 18 26 / 0.14);
+  --spot-color: oklch(0.70 0.16 250 / 0.10);
+}
+
+/* ══════════════════════════ 基础样式 ══════════════════════════ */
+
+@layer base {
+  * {
+    border-color: var(--color-line-faint);
+  }
+
+  html,
+  body,
+  #app {
+    height: 100%;
+  }
+
+  body {
+    background: var(--color-bg-0);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: var(--text-base--line-height);
+    /* 暗色背景上的浅色文字需要抗锯齿才不发毛 */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* 面板是固定视口的应用外壳，滚动发生在内部的滚动容器上 */
+    overflow: hidden;
+  }
+
+  /* 标题收紧字距 —— 这是「设计感」里性价比最高的一条 */
+  h1,
+  h2,
+  h3,
+  h4 {
+    letter-spacing: -0.022em;
+    font-weight: 600;
+  }
+
+  /* 键盘聚焦才显示焦点环，鼠标点击不显示 */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::selection {
+    background: var(--color-accent-soft);
+    color: var(--color-ink);
+  }
+
+  /* 细滚动条；默认滚动条在暗色面板里非常突兀 */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgb(255 255 255 / 0.10);
+    border-radius: 999px;
+    /* 内缩 3px 让滚动条看起来更细，而不是真的把它做细 ——
+       真正的细滚动条很难点中 */
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgb(255 255 255 / 0.20);
+    background-clip: content-box;
+  }
+  html.light ::-webkit-scrollbar-thumb {
+    background: rgb(0 0 0 / 0.18);
+    background-clip: content-box;
+  }
+
+  input,
+  textarea,
+  select,
+  button {
+    font: inherit;
+    color: inherit;
+  }
+}
+
+/* ══════════════════════════ 工具类 ══════════════════════════ */
+
+@layer utilities {
+  /* ── 表面 ──────────────────────────────────────────────── */
+
+  /**
+   * 标准卡片。
+   *
+   * 关键在于 border 与 inset 高光**一起**用：只有 border 会显得平，
+   * 只有高光在浅色下又会消失。
+   */
+  .surface {
+    background: var(--color-bg-1);
+    border: 1px solid var(--color-line-faint);
+    box-shadow: inset 0 1px 0 var(--color-highlight);
+  }
+
+  .surface-2 {
+    background: var(--color-bg-2);
+    border: 1px solid var(--color-line-faint);
+    box-shadow: inset 0 1px 0 var(--color-highlight);
+  }
+
+  /* ── 磨砂 ──────────────────────────────────────────────── */
+
+  /**
+   * 磨砂表面。
+   *
+   * saturate(180%) 是让模糊「有颜色」的关键：纯 blur 会把背后的
+   * 环境光晕洗成灰色，加饱和度才能透出那一层蓝紫色调。
+   *
+   * 透明度是这里唯一需要反复试的参数。第一版用了 68%，结果在截图里
+   * 看起来完全是一块实心面板 —— 因为 68% 不透明的深色叠在近黑背景上，
+   * 透出来的那点差异肉眼分辨不出。降到 52% 之后背后的光晕才真的
+   * 参与进来，「玻璃」才成立。
+   *
+   * 代价是文字对比度会降一点，所以玻璃层只用在框架（侧栏/顶栏）与
+   * 浮层上 —— 正文卡片一律走 surface 的实色。
+   */
+  .glass {
+    background: color-mix(in oklab, var(--glass-base) var(--glass-alpha), transparent);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    border-color: var(--color-line);
+  }
+
+  /* 更厚的一档，用于浮在内容最上层的模态与命令面板。
+     比 .glass 更不透明一点：浮层上要读文字，不能为了好看牺牲可读性。 */
+  .glass-deep {
+    background: color-mix(in oklab, var(--glass-deep-base) var(--glass-deep-alpha), transparent);
+    backdrop-filter: blur(32px) saturate(190%);
+    -webkit-backdrop-filter: blur(32px) saturate(190%);
+    border-color: var(--color-line);
+    box-shadow:
+      inset 0 1px 0 var(--color-highlight),
+      0 24px 64px -16px var(--glass-shadow, rgb(0 0 0 / 0.7));
+  }
+
+  /* ── 环境光晕 ──────────────────────────────────────────── */
+
+  /**
+   * 环境光晕层。**这是磨砂能读得出来的前提。**
+   *
+   * 光斑的颜色与强度抽成令牌，因为**明暗两套的取值逻辑是相反的**：
+   *
+   *   暗色 → 需要高明度、高彩度的光斑（L≈0.70 C≈0.21）。
+   *          近黑底上，低彩度的颜色只会显示成"深灰"，完全没有光感。
+   *
+   *   浅色 → 需要**极高明度、极低彩度**（L≈0.93 C≈0.04）。
+   *          直接把暗色的光斑搬到浅底上会得到两团脏色 ——
+   *          看起来像渲染故障或屏幕坏点，而不是光。
+   *          浅色下的"光"本质上就是"有色的白光"，
+   *          彩度稍高一点就从"空气感"变成"污渍"。
+   *
+   * 玻璃层的策略同样是反的：暗色下玻璃要比背景**更透**才能显出模糊，
+   * 浅色下则要比背景**更白更实**（macOS 浅色模式就是这个路子），
+   * 因为浅底上再透明也只是露出背景而已。
+   */
+  .ambient {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .ambient-orb {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(var(--orb-blur, 72px));
+    opacity: var(--ambient-opacity, 0.5);
+    will-change: transform;
+  }
+
+  @keyframes drift-a {
+    0%,
+    100% {
+      transform: translate3d(0, 0, 0) scale(1);
+    }
+    50% {
+      transform: translate3d(6%, 4%, 0) scale(1.08);
+    }
+  }
+
+  @keyframes drift-b {
+    0%,
+    100% {
+      transform: translate3d(0, 0, 0) scale(1.05);
+    }
+    50% {
+      transform: translate3d(-5%, 6%, 0) scale(1);
+    }
+  }
+
+  @keyframes drift-c {
+    0%,
+    100% {
+      transform: translate3d(0, 0, 0) scale(1);
+    }
+    50% {
+      transform: translate3d(4%, -5%, 0) scale(1.1);
+    }
+  }
+
+  /* ── 品牌渐变 ──────────────────────────────────────────── */
+
+  .brand-gradient {
+    background: linear-gradient(125deg, var(--color-accent-bright), var(--color-violet));
+  }
+
+  .brand-text {
+    background: linear-gradient(125deg, var(--color-accent-bright), var(--color-violet));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* ── 数字 ──────────────────────────────────────────────── */
+
+  /* 等宽数字：实时计数跳动时宽度不抖，这是「仪表感」的基础 */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum' 1;
+  }
+
+  /* ── 动画 ──────────────────────────────────────────────── */
+
+  /* 新条目的高亮扫过：从品牌色淡出到透明 */
+  @keyframes sweep {
+    0% {
+      background-color: var(--color-accent-soft);
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+  .sweep-in {
+    animation: sweep var(--duration-page) var(--ease-expo);
+  }
+
+  @keyframes shimmer {
+    0% {
+      background-position: -200% 0;
+    }
+    100% {
+      background-position: 200% 0;
+    }
+  }
+
+  /* 骨架屏的微光；比整块闪烁克制得多 */
+  .skeleton {
+    background: linear-gradient(
+      90deg,
+      var(--color-bg-2) 25%,
+      var(--color-bg-3) 50%,
+      var(--color-bg-2) 75%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.6s linear infinite;
+  }
+
+  /* 实时数值变化时的一次高亮脉冲。
+     用于「这个数字刚刚变了」的反馈 —— 没有它，实时数据在视觉上是静止的，
+     用户感觉不到「活着」。 */
+  @keyframes value-pulse {
+    0% {
+      color: var(--color-accent-bright);
+    }
+    100% {
+      color: inherit;
+    }
+  }
+  .value-pulse {
+    animation: value-pulse 900ms var(--ease-expo);
+  }
+
+  @keyframes pulse-ring {
+    0% {
+      transform: scale(0.9);
+      opacity: 0.7;
+    }
+    70%,
+    100% {
+      transform: scale(2.2);
+      opacity: 0;
+    }
+  }
+  .pulse-ring {
+    animation: pulse-ring 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  /* ── 分隔线 ────────────────────────────────────────────── */
+
+  /* 渐变分隔线：两端淡出，比一根实线柔和得多 */
+  .rule-x {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--color-line), transparent);
+  }
+}
+
+/* ══════════════════════════ 无障碍 ══════════════════════════ */
+
+/**
+ * 尊重系统的「减少动态效果」设置。
+ *
+ * 降级为纯透明度过渡而不是彻底关闭 —— 完全不动会让「操作有没有生效」
+ * 失去反馈，那是另一种无障碍问题。
+ *
+ * 环境光晕是唯一例外：它纯粹是装饰，直接停掉。
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .ambient-orb {
+    animation: none !important;
+  }
+}

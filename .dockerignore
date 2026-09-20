@@ -1,0 +1,39 @@
+# 构建上下文裁剪。
+#
+# 没有这个文件的话，node_modules 与 data/ 会被整个打进构建上下文 ——
+# 在 Windows 上尤其明显：几万个文件的复制会让每次 docker build 先卡几分钟。
+
+**/node_modules
+**/dist
+**/.turbo
+
+# Go 编译产物与本地缓存
+packages/server-go/tgs
+packages/server-go/tgs.exe
+**/*.exe
+
+# 运行时数据绝不能进镜像：里面有加密后的 bot token 与全部中继消息
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+logs/
+
+# 密钥
+.env
+.env.local
+.env.*.local
+
+# 截图（可再生产物）
+packages/web-vue/shots
+.chrome-profile
+
+# 版本控制与编辑器
+.git
+.gitignore
+.github
+.vscode
+.idea
+.DS_Store
+Thumbs.db

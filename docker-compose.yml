@@ -1,0 +1,74 @@
+services:
+  panel:
+    # 两种用法：
+    #
+    #   1. 用发布好的镜像（推荐）—— 先把下面的 build 段注释掉
+    #   2. 本地构建 —— 保持原样，docker compose up -d --build
+    #
+    # image 名里的 owner 换成你自己的 GitHub 用户名。
+    image: ghcr.io/kexue-aihao/telegram_session_adblock:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${VERSION:-dev}
+
+    container_name: tgs-panel
+    restart: unless-stopped
+
+    ports:
+      # 只监听回环，由外部的反向代理（Caddy / Nginx）终结 TLS。
+      # 面板持有全部机器人 token 的加密密钥，直接暴露到公网并不合适。
+      - '127.0.0.1:8787:8787'
+
+    environment:
+      APP_ENV: production
+      HOST: 0.0.0.0
+      PORT: '8787'
+      TZ: ${TZ:-Asia/Shanghai}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # SQLite 落在挂载卷里。镜像里这个目录已归 nonroot（65532）所有，
+      # Docker 会用镜像里的属主去初始化新建的命名卷，所以无需额外操作。
+      DATABASE_URL: file:/data/app.db
+
+      # ── 必填，从 .env 读取 ─────────────────────────────────
+      MASTER_KEY: ${MASTER_KEY:?MASTER_KEY 必须设置 —— 见 .env.example}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET 必须设置 —— 见 .env.example}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?首次启动需要 ADMIN_PASSWORD —— 见 .env.example}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+
+    volumes:
+      # 唯一的持久化数据：SQLite 单文件（含 WAL 与 SHM）
+      - tgs-data:/data
+
+    # 镜像里没有 shell，也没有 curl —— 探针只能是二进制自己。
+    # 用 ready 而不是 health：前者会真的 ping 一次数据库。
+    healthcheck:
+      test: ['CMD', '/tgs', '-healthcheck']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # 镜像基于 scratch，没有 shell 也没有用户态工具。
+    # 真要进容器排查的话只能用 docker debug 或 nsenter ——
+    # 这是换取体积与攻击面所付的代价，调试时读日志即可。
+    read_only: true
+    tmpfs:
+      # SQLite 在 WAL 模式下需要写临时文件
+      - /tmp
+
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: json-file
+      options:
+        # 面板日志里不会有 token（logger 已配置 redact），但长期无人看管
+        # 的日志文件会撑爆磁盘 —— 这是自托管服务最常见的故障之一
+        max-size: '10m'
+        max-file: '3'
+
+volumes:
+  tgs-data:
+    driver: local

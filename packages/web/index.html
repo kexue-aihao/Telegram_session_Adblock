@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#08090C" />
+    <title>会话中继面板</title>
+    <meta name="description" content="Telegram 话题式会话管理器与广告审计面板" />
+    <!--
+      主题色在首屏脚本之前内联设置：React 挂载需要几百毫秒，
+      如果不在这里先涂上底色，用户会看到一瞬间的白屏再变暗 ——
+      这是暗色面板最常见也最廉价的一种「不高级感」。
+    -->
+    <style>
+      html { background: #08090c; color-scheme: dark; }
+      html.light { background: #f7f8fa; color-scheme: light; }
+    </style>
+    <script>
+      // 主题偏好：跟随系统，但面板自身的设置优先
+      (function () {
+        try {
+          var stored = localStorage.getItem('tgs.theme');
+          var prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
+          var theme = stored === 'light' || stored === 'dark' ? stored : prefersLight ? 'light' : 'dark';
+          document.documentElement.classList.toggle('dark', theme === 'dark');
+          document.documentElement.classList.toggle('light', theme === 'light');
+        } catch (e) {
+          /* localStorage 不可用时保持默认的暗色 */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
