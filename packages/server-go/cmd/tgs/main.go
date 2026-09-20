@@ -104,6 +104,17 @@ func run() error {
 		log.Debug("已加载环境变量文件", "path", env.EnvFile)
 	}
 
+	// PUBLIC_URL / WEBHOOK_* 目前只是占位：配置层会解析它们，
+	// 但运行时只有长轮询，webhook 尚未实现。
+	//
+	// 显式告警而不是静默忽略：这几个变量的名字本身就在承诺
+	// 「设了我就会切到 webhook」，而用户设完之后唯一能观察到的现象是
+	// 「没什么变化」—— 那比报错更难排查。
+	if env.PublicURL != "" {
+		log.Warn("PUBLIC_URL 已设置，但当前版本只有长轮询，webhook 模式尚未实现；该变量会被忽略",
+			"publicUrl", env.PublicURL)
+	}
+
 	// ── 数据库 ────────────────────────────────────────────────
 	startCtx, cancelStart := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelStart()
