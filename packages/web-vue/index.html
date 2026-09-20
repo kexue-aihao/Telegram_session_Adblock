@@ -7,6 +7,16 @@
     <meta name="theme-color" content="#07080B" />
     <title>会话中继面板</title>
     <meta name="description" content="Telegram 话题式会话管理器与广告审计面板" />
+
+    <!--
+      图标。SVG 优先：现代浏览器都支持，且任意缩放都清晰 —— 标签页在
+      HiDPI 屏上按 32 设备像素渲染，位图在这个尺寸下会发虚。
+      另配一张 iOS 主屏图标，因为 Safari 不接受 SVG 作为 apple-touch-icon。
+      两个文件都在 public/ 下，构建时由 Vite 原样拷到 dist 根目录，
+      由 Go 服务端静态托管，因此路径就是 /favicon.svg 与 /apple-touch-icon.png。
+    -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <!--
       主题色在首屏脚本之前内联设置：Vue 挂载需要几百毫秒，
       如果不在这里先涂上底色，用户会看到一瞬间的白屏再变暗 ——

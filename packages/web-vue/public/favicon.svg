@@ -1,0 +1,63 @@
+<!--
+  会话中继面板的品牌标记。
+
+  两件事各占一半：**气泡**是会话中继（一人一话题，用户私聊进话题、管理员在话题里回复），
+  斜杠是广告拦截（命中规则即拦下并留审计）。所以标记就是「被划掉的气泡」——
+  一个不该出现在这里的气泡。
+
+  取材自面板内已有的品牌标记（AppShell.vue / LoginView.vue 里那个描边气泡），
+  几何完全一致，只改了填充与配色：
+
+  · 填充而非描边。16px 的标签页里，1.8/24 的描边只剩不到 1.2 个像素，
+    会糊成一个灰团；实心块在任何尺寸下都还认得出形状。
+  · 斜杠用「切穿」而不是「叠一道线」：切口露出的是底色，因此在浅色标签栏与
+    深色标签栏上都是同一个形状，不需要两套配色。
+  · 斜杠方向取左上到右下，气泡的尾巴（左下）因此落在同一侧，不会被切散 ——
+    切口之上是一小片，之下是带着尾巴的那一大片，「气泡」这个身份留在大的那半边。
+
+  配色取自 theme.css 的 .brand-gradient（品牌蓝到紫罗兰两个端点）。
+  这里写 sRGB hex 而不是 oklch()：favicon 可能在老浏览器里渲染，oklch() 解析
+  不了时整个 fill 会失效（退化成黑色方块），不值得为色相精度冒这个险。
+  两个值已经是把 oklch 降到 sRGB 色域内的结果。
+
+  注意：下面这些说明只能放在 XML 注释里，而 XML 注释不允许出现连续两个连字符
+  （写 CSS 变量名时要当心），否则整份文档解析失败，浏览器里表现为图标直接不显示。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="会话中继面板">
+  <defs>
+    <!-- 125deg，与界面上的品牌渐变同一个方向 -->
+    <linearGradient id="brand" x1="0" y1="0" x2="0.819" y2="0.574">
+      <stop offset="0" stop-color="#7cbdff" />
+      <stop offset="1" stop-color="#9e71fd" />
+    </linearGradient>
+
+    <!-- 顶部内高光，对应界面里品牌块上的内阴影高光 -->
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.34" />
+      <stop offset="0.55" stop-color="#fff" stop-opacity="0.04" />
+      <stop offset="1" stop-color="#fff" stop-opacity="0" />
+    </linearGradient>
+
+    <!-- 黑色即挖掉。斜杠两端用圆头，切口才不像被削掉一角 -->
+    <mask id="slash">
+      <rect width="64" height="64" fill="#fff" />
+      <line x1="13" y1="9" x2="55" y2="51" stroke="#000" stroke-width="9" stroke-linecap="round" />
+    </mask>
+  </defs>
+
+  <rect width="64" height="64" rx="15" fill="url(#brand)" />
+
+  <!--
+    界面上那个 24 box 的气泡，等比放大到 64 box：宽度占 42/64，
+    包围盒中心落在 (32, 31.5)（略高于正中，给左下角那条尾巴留出视觉重量）。
+    包围盒 4 6.1803 16.5 14.3197 是实测值 —— 这条 path 的两段弧并不同心
+    （第二段的弦长 15.34 超过直径 15），解析求包围盒会算错。
+  -->
+  <g mask="url(#slash)">
+    <g transform="translate(0.818 -2.457) scale(2.5455)">
+      <path d="M20.5 12.5a7.5 7.5 0 0 1-10.9 6.7L4 20.5l1.4-5.3A7.5 7.5 0 1 1 20.5 12.5Z" fill="#fff" />
+    </g>
+  </g>
+
+  <rect x="0.9" y="0.9" width="62.2" height="62.2" rx="14.1" fill="none" stroke="url(#gloss)" stroke-width="1.8" />
+</svg>
