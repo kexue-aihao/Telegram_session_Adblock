@@ -38,6 +38,13 @@ COPY packages/web-vue/package.json packages/web-vue/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
     pnpm install --frozen-lockfile
 
+# tsconfig.base.json 必须一起拷进来。
+#
+# packages/web-vue/tsconfig.json 用 `extends: "../../tsconfig.base.json"`
+# 引用了它 —— 而 Vite 底层的 rolldown 会解析 tsconfig，文件缺失时直接
+# 以「Tsconfig not found」退出（code 1），报错信息里不会提到 Dockerfile，
+# 第一次遇到很容易往别处找原因。
+COPY tsconfig.base.json ./
 COPY packages/web-vue packages/web-vue
 RUN pnpm --filter @tgs/web-vue build
 
