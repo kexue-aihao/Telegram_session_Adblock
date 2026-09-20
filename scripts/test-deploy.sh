@@ -129,6 +129,23 @@ export PATH="$STUB:$PATH"
 export STUB_HAS_PANEL_NETWORK=0
 export STUB_CONTAINER_EXISTS=0
 
+# chown 也要桩掉，并记录调用参数。
+#
+# 这一条是有来历的：容器以 UID 65532（非 root）运行，而 ./data 是
+# **目录挂载** —— Dockerfile 里那句 `COPY --chown=65532` 只对命名卷生效，
+# bind mount 用的是宿主目录的属主。
+#
+# 漏掉 chown 的现象很有迷惑性：容器起得来、几秒后退出，日志里只有
+# 「连接数据库失败（/data/app.db）: unable to open database file」，
+# 报错完全不提权限。这是真机上踩过的坑。
+export CHOWN_LOG="$WORK/chown.log"
+cat > "$STUB/chown" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "${CHOWN_LOG:?}"
+exit 0
+EOF
+chmod +x "$STUB/chown"
+
 run_deploy() {
   # 用 env -i 隔离，避免外部环境变量串味
   bash "$SCRIPT" --dir "$WORK/data" --admin-password "TestPass1234" --yes "$@" 2>&1
@@ -159,6 +176,13 @@ contains "compose 挂载 ./data" "./data:/data" "$comp1"
 contains "compose 用二进制自检做探针" "['CMD', '/tgs', '-healthcheck']" "$comp1"
 not_contains "无 1panel-network 时不写 networks 段" "1panel-network" "$comp1"
 check_compose_structure "compose 结构无空映射（无 1panel-network）" "$WORK/data/docker-compose.yml"
+
+# 数据目录的属主必须交给容器内的运行用户。
+# 漏掉这一步的现象是容器起得来但立刻退出，日志里只有
+# 「unable to open database file」，完全不提权限。
+contains "数据目录已 chown 给容器运行用户" \
+  "-R 65532:65532 $WORK/data/data" \
+  "$(cat "$CHOWN_LOG" 2>/dev/null || echo '')"
 
 # 记录第一次的密钥与状态，用于稍后比对
 KEY1="$(grep '^MASTER_KEY=' "$WORK/data/.env")"

@@ -450,6 +450,46 @@ EOF
   ok "已写入 $compose_file"
 }
 
+# ══════════════════════════ 数据目录 ══════════════════════════
+
+# 容器内运行的用户 UID，必须与 Dockerfile 里的 `USER 65532:65532` 一致。
+# 65532 是 distroless 的 nonroot 约定值。
+CONTAINER_UID=65532
+
+prepare_data_dir() {
+  step "准备数据目录"
+
+  local data_subdir="$DATA_DIR/data"
+  mkdir -p "$data_subdir"
+
+  # ── 为什么这里必须 chown ──────────────────────────────────
+  #
+  # 容器以 UID 65532（非 root）运行，而 ./data 是**目录挂载**。
+  #
+  # 目录挂载用的是宿主目录的属主，Dockerfile 里那句
+  # `COPY --chown=65532:65532 /out/data /data` 只对**命名卷**生效 ——
+  # Docker 用镜像里的目录属主去初始化新建的命名卷，但对 bind mount
+  # 完全不起作用，挂载点直接就是宿主目录本身。
+  #
+  # 不 chown 的现象很有迷惑性：容器能起来、几秒后退出，日志里只有
+  #
+  #     连接数据库失败（/data/app.db）: unable to open database file (14)
+  #
+  # 这个报错完全不提「权限」，很容易往数据库配置或路径上找。
+  #
+  # 用 -R 而不是只改目录本身：升级时目录里已有 app.db（由容器创建，
+  # 本来就是 65532），但早期版本建的目录可能是 root 属主，
+  # 一条命令把历史遗留一并覆盖。
+  if chown -R "${CONTAINER_UID}:${CONTAINER_UID}" "$data_subdir" 2>/dev/null; then
+    ok "数据目录属主已设为 ${CONTAINER_UID}（容器内运行用户）"
+  else
+    warn "无法把 $data_subdir 的属主改成 ${CONTAINER_UID}"
+    warn "容器以非 root 用户运行，若该目录不可写会启动失败并报"
+    warn "「unable to open database file」。可手工执行："
+    warn "  sudo chown -R ${CONTAINER_UID}:${CONTAINER_UID} $data_subdir"
+  fi
+}
+
 # ══════════════════════════ 容器生命周期 ══════════════════════════
 
 pull_image() {
@@ -515,9 +555,42 @@ wait_healthy() {
         ;;
       unhealthy)
         printf '\n'
+        local logs
+        logs="$($COMPOSE -f "$DATA_DIR/docker-compose.yml" logs --tail 40 2>&1)"
+
         warn "容器报告不健康。最近日志："
-        $COMPOSE -f "$DATA_DIR/docker-compose.yml" logs --tail 30 2>&1 | sed 's/^/    /' >&2
-        die "启动失败。最常见的原因是 ADMIN_PASSWORD 不合规，或 $DATA_DIR 权限不对。"
+        printf '%s\n' "$logs" | sed 's/^/    /' >&2
+
+        # 按日志内容给出针对性的提示。
+        #
+        # 之前这里写的是一句笼统的猜测（「最常见的原因是 ADMIN_PASSWORD
+        # 不合规，或权限不对」）—— 而在真实机器上两种原因的表象完全不同，
+        # 猜错方向会让人去改一个根本没错的配置。
+        printf '\n' >&2
+        case "$logs" in
+          *"unable to open database file"*)
+            warn "看起来是数据目录不可写。容器以非 root 用户（${CONTAINER_UID}）运行，"
+            warn "而目录挂载用的是宿主目录的属主。执行："
+            warn "  sudo chown -R ${CONTAINER_UID}:${CONTAINER_UID} $DATA_DIR/data"
+            warn "  cd $DATA_DIR && $COMPOSE restart"
+            ;;
+          *"环境变量校验失败"*|*"ADMIN_PASSWORD"*)
+            warn "看起来是环境变量不合规。"
+            warn "改 $DATA_DIR/.env 里对应的那一项后重启："
+            warn "  cd $DATA_DIR && $COMPOSE up -d --force-recreate"
+            ;;
+          *"无法解密"*|*"MASTER_KEY"*)
+            warn "看起来 MASTER_KEY 与库里已有的密文对不上。"
+            warn "若你换过 MASTER_KEY，需要到面板里重新录入每个机器人的 token；"
+            warn "若不想保留旧数据：sudo bash $0 --purge"
+            ;;
+          *"address already in use"*)
+            warn "端口 ${PORT} 已被占用。换一个端口重跑："
+            warn "  sudo bash $0 --port <其他端口>"
+            ;;
+        esac
+
+        die "启动失败。完整日志：cd $DATA_DIR && $COMPOSE logs"
         ;;
     esac
     printf '  %s…（%d/30，当前 %s）\r' "$DIM" "$i" "$health"
@@ -661,6 +734,7 @@ main() {
 
   mkdir -p "$DATA_DIR/data"
   chmod 700 "$DATA_DIR"
+  prepare_data_dir
 
   write_env
   write_compose

@@ -135,13 +135,21 @@ COPY --from=web-builder /repo/packages/web-vue/dist /web-dist
 # 数据目录。
 #
 # 用 --chown 而不是在运行时 chown —— scratch 里没有 chown 命令。
-# 这里的 UID 65532 是 distroless 的 nonroot 约定值，选它是为了
-# 「以后想换成 distroless 时不用再动」。
+# 这里的 UID 65532 是 distroless 的 nonroot 约定值，与下面的 USER 一致。
 #
-# Docker 会用镜像里这个目录的所有者去初始化**新建的命名卷**，
-# 所以匿名卷与命名卷都能直接写；只有 bind mount 需要宿主侧
-# 自己 chown 65532。这一步不做的话，容器会以 root 运行 ——
-# 对自托管面板虽可接受，但没必要。
+# ── 这一行只解决一半问题，别被它误导 ────────────────────────
+#
+# Docker 用镜像里这个目录的属主去初始化**新建的命名卷**，
+# 所以命名卷开箱即用。但**目录挂载（bind mount）完全不走这条路** ——
+# 挂载点就是宿主目录本身，属主是宿主上的那个。
+#
+# 而容器**始终**以 USER 指定的 65532 运行（这一行改变不了这一点），
+# 于是宿主目录若是 root 属主，容器能起来、几秒后退出，日志里只有
+#
+#     连接数据库失败（/data/app.db）: unable to open database file (14)
+#
+# 完全不提权限。所以部署脚本里有一条对应的 `chown -R 65532:65532`，
+# 两处必须一起看。
 COPY --from=go-builder --chown=65532:65532 /out/data /data
 
 ENV APP_ENV=production
