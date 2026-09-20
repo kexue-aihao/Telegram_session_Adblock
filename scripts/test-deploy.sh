@@ -441,6 +441,11 @@ reset_migration
 out="$(deploy --dir "$WORK/new-outside-opt" --yes --admin-password TestPass1234 2>&1)"; status=$?
 check "新安装不能放在 /opt 外" "yes" "$([ "$status" -ne 0 ] && echo yes || echo no)"
 
+reset_migration
+out="$(sed "s|^OPT_ROOT=\"/opt\"$|OPT_ROOT=\"$WORK/opt\"|" "$SCRIPT" | bash -s -- --dir "$DEPLOY" --yes --admin-password TestPass1234 2>&1)"; status=$?
+check "curl 管道形式执行成功" "0" "$status"
+contains "管道形式实际完成部署" "部署完成" "$out"
+
 if [ "$(uname -s)" = "Linux" ]; then
   echo
   echo "── 场景 11：并发部署与符号链接 ──"
