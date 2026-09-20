@@ -40,6 +40,17 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
+      # GHCR 要求镜像名**全小写**，而 GitHub 仓库名可以含大写字母
+      # （本仓库就是 Telegram_session_Adblock）。
+      # docker/metadata-action 不会自动转换，直接把 github.repository
+      # 塞进去会在推送时失败，而且报错只提「invalid reference format」，
+      # 不说是大小写的问题。
+      #
+      # bash 的 ${VAR,,} 是小写展开，在 ubuntu runner 的 bash 下可用。
+      - name: 计算小写的镜像名
+        id: repo
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
       - name: 登录 GHCR
         uses: docker/login-action@v3
         with:
@@ -51,8 +62,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # 仓库名转小写 —— GHCR 不接受大写字母，而 GitHub 用户名可以含大写
-          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          images: ${{ env.REGISTRY }}/${{ steps.repo.outputs.name }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -195,6 +205,11 @@ jobs:
           name: binaries
           path: dist
 
+      # 与镜像任务同样的原因：GHCR 的名字必须全小写
+      - name: 计算小写的镜像名
+        id: repo
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
       - name: 创建 Release
         uses: softprops/action-gh-release@v2
         with:
@@ -206,10 +221,12 @@ jobs:
             ## 容器镜像
 
             ```bash
-            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            docker pull ghcr.io/${{ steps.repo.outputs.name }}:${{ github.ref_name }}
             ```
 
-            支持 `linux/amd64` 与 `linux/arm64`。
+            支持 `linux/amd64` 与 `linux/arm64`。镜像基于 `scratch` ——
+            没有 shell、没有包管理器，全部内容只有一个静态链接的二进制、
+            CA 证书与前端产物。
 
             ## 独立二进制
 

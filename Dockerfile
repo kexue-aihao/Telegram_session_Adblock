@@ -18,7 +18,13 @@
 # ═══════════════════════════════════════════════════════════════
 
 # ────────────────────────── 阶段 1：前端 ──────────────────────────
-FROM node:24-slim AS web-builder
+#
+# `--platform=$BUILDPLATFORM` 是关键：它让这个阶段**只在原生架构上跑一次**，
+# 而不是为每个目标架构各跑一遍。
+#
+# 前端产物是与架构无关的静态文件，为 arm64 镜像在 QEMU 里重新跑一遍
+# npm install + vite build 要花好几分钟，且产物字节级相同 —— 纯浪费。
+FROM --platform=$BUILDPLATFORM node:24-slim AS web-builder
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 RUN corepack enable
@@ -50,11 +56,20 @@ RUN pnpm --filter @tgs/web-vue build
 
 
 # ────────────────────────── 阶段 2：Go 二进制 ──────────────────────────
-FROM golang:1.26-alpine AS go-builder
+#
+# 同样固定在构建平台上，再靠 Go 自己的交叉编译产出目标架构的二进制。
+#
+# 这是 CGO_ENABLED=0 换来的直接好处：纯 Go 代码的交叉编译不需要任何
+# C 工具链，所以 arm64 的二进制可以在 amd64 的构建机上直接编出来，
+# 完全绕开 QEMU 模拟 —— 多架构构建从「几十分钟」降到「一两分钟」。
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS go-builder
 
 # alpine 默认不带 CA 证书，而容器里要访问 https://api.telegram.org。
 # 装完从这一层拷进最终镜像。
-RUN apk add --no-cache ca-certificates
+#
+# `file` 是为了下面那条产物架构断言 —— busybox 不提供它。
+# 这是构建阶段的依赖，不会进入最终镜像，所以体积代价为零。
+RUN apk add --no-cache ca-certificates file
 
 WORKDIR /src
 
@@ -65,17 +80,45 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 COPY packages/server-go/ ./
 
+# TARGETOS / TARGETARCH 由 BuildKit 按 --platform 自动注入，
+# 在这个阶段里它们代表**目标**架构（而 BUILDPLATFORM 代表构建机架构）。
+#
+# 必须在 FROM 之后重新声明才可见，而且不能写成 ENV ——
+# 写死 GOOS=linux 而不管 GOARCH 是一个很隐蔽的坑：单看代码「编译通过、
+# 镜像也建出来了」，但 arm64 镜像里装的其实是 amd64 的二进制，
+# 只有在真机上跑才会以 exec format error 暴露。
+ARG TARGETOS
+ARG TARGETARCH
+
 ARG VERSION=dev
-ENV CGO_ENABLED=0 GOOS=linux
+ENV CGO_ENABLED=0
 
 # -s -w 去掉符号表与调试信息，13MB → 约 9MB。
 # 代价是 panic 的堆栈没有行号 —— 真要排查线上崩溃时，
 # 用同一个 VERSION 重新构建一次带符号的二进制即可对上。
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath \
       -ldflags "-s -w -X github.com/tgs/server/internal/api.Version=${VERSION}" \
       -o /out/tgs ./cmd/tgs
+
+# 顺带断言一下产物架构，让「交叉编译没生效」这类问题在构建期就炸掉，
+# 而不是等到用户在 arm64 机器上 docker run 才发现。
+RUN set -eux; \
+    expected="${TARGETARCH}"; \
+    case "$expected" in \
+      amd64) want="x86-64" ;; \
+      arm64) want="aarch64" ;; \
+      *) want="" ;; \
+    esac; \
+    if [ -n "$want" ]; then \
+      got=$(file -b /out/tgs 2>/dev/null || echo "unknown"); \
+      echo "产物架构: $got（期望含 $want）"; \
+      echo "$got" | grep -q "$want" || { \
+        echo "::error::交叉编译未生效：目标 $TARGETARCH 但产物是 $got"; exit 1; \
+      }; \
+    fi
 
 # 空目录，用来承接镜像里的 /data 所有者设置（见下）
 RUN mkdir -p /out/data
