@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tgs/server/internal/bus"
 	"github.com/tgs/server/internal/domain"
 	"github.com/tgs/server/internal/rules"
 	"github.com/tgs/server/internal/store"
@@ -128,7 +129,15 @@ func (r *Runtime) ensureTopic(
 	ctx context.Context,
 	settings store.BotSettings,
 	contact store.ContactRow,
-) (store.TopicRow, bool, error) {
+) (result store.TopicRow, created bool, resultErr error) {
+	// Every entry point that creates a conversation must notify the WebUI.
+	defer func() {
+		if resultErr == nil && created {
+			_ = r.bumpStats(ctx, store.StatDelta{TopicsCreated: 1})
+			r.publishSessionEvent(ctx, result.ID, bus.EventSessionCreated)
+		}
+	}()
+
 	// 没绑管理群就别往下走了。
 	//
 	// 不加这个判断的话，会拿 chat_id=0 去调 createForumTopic，
@@ -165,7 +174,7 @@ func (r *Runtime) ensureTopic(
 	title := buildTopicTitle(settings.TopicNameTemplate, contact, r.botName)
 	iconColor := resolveIconColor(settings.TopicIconColor)
 
-	created, err := r.api.CreateForumTopic(ctx, r.adminGroupID, title, iconColor)
+	forumTopic, err := r.api.CreateForumTopic(ctx, r.adminGroupID, title, iconColor)
 	if err != nil {
 		// 把 Telegram 的英文原文换成人能照着修的说法。
 		//
@@ -176,12 +185,12 @@ func (r *Runtime) ensureTopic(
 			DescribeTelegramError(err))
 	}
 
-	topic, err := r.db.CreateTopic(ctx, r.botID, contact.ID, created.MessageThreadID, title, iconColor)
+	topic, err := r.db.CreateTopic(ctx, r.botID, contact.ID, forumTopic.MessageThreadID, title, iconColor)
 	if err != nil {
 		if errors.Is(err, store.ErrDuplicate) {
 			// 竞态：另一个协程抢先建好了。用它的记录，把我们多建的话题删掉。
 			r.log.Debug("话题创建竞态，复用已有记录", "contactId", contact.ID)
-			_ = r.api.DeleteForumTopic(ctx, r.adminGroupID, created.MessageThreadID)
+			_ = r.api.DeleteForumTopic(ctx, r.adminGroupID, forumTopic.MessageThreadID)
 
 			raced, getErr := r.db.GetTopicByContact(ctx, r.botID, contact.ID)
 			if getErr != nil {

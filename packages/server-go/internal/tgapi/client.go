@@ -289,6 +289,11 @@ func (c *Client) GetMe(ctx context.Context) (*BotUser, error) {
 	return &out, nil
 }
 
+// DeleteWebhook switches to polling while preserving pending updates.
+func (c *Client) DeleteWebhook(ctx context.Context) error {
+	return c.call(ctx, "deleteWebhook", map[string]any{"drop_pending_updates": false}, nil)
+}
+
 // GetUpdates 长轮询拉取更新。
 //
 // offset 的语义：传入「上一个已确认处理的 update_id + 1」，

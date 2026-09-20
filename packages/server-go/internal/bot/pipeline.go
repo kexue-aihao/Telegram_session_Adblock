@@ -33,12 +33,14 @@ func (r *Runtime) processUserMessage(ctx context.Context, messages []*tgapi.Mess
 	settings, err := r.db.GetBotSettings(ctx, r.botID)
 	if err != nil {
 		r.log.Error("读取机器人设置失败", "botId", r.botID, "err", err)
+		r.setRelayError(ctx, err)
 		return
 	}
 
 	contact, err := r.db.UpsertContact(ctx, r.botID, profileOf(first.From))
 	if err != nil {
 		r.log.Error("更新联系人失败", "err", err)
+		r.setRelayError(ctx, err)
 		return
 	}
 
@@ -337,11 +339,13 @@ func (r *Runtime) handleStart(ctx context.Context, m *tgapi.Message) {
 
 	settings, err := r.db.GetBotSettings(ctx, r.botID)
 	if err != nil {
+		r.setRelayError(ctx, err)
 		return
 	}
 
 	contact, err := r.db.UpsertContact(ctx, r.botID, profileOf(m.From))
 	if err != nil {
+		r.setRelayError(ctx, err)
 		return
 	}
 	if contact.IsBlocked {
@@ -360,15 +364,13 @@ func (r *Runtime) handleStart(ctx context.Context, m *tgapi.Message) {
 
 	// /start 是唯一一个「用户还没说话就已经需要建话题」的时机，
 	// 先把话题备好，管理员就能在用户开口前看到这个人。
-	topic, created, err := r.ensureTopic(ctx, settings, contact)
+	topic, _, err := r.ensureTopic(ctx, settings, contact)
 	if err != nil {
 		r.log.Error("为用户创建话题失败", "contactId", contact.ID, "err", err)
+		r.setRelayError(ctx, err)
 		return
 	}
-	if created {
-		_ = r.bumpStats(ctx, store.StatDelta{TopicsCreated: 1})
-		r.publishSessionEvent(ctx, topic.ID, bus.EventSessionCreated)
-	}
+	r.clearRelayError(ctx)
 	_ = r.db.TouchTopic(ctx, topic.ID)
 }
 
@@ -651,7 +653,9 @@ func (r *Runtime) setRelayError(ctx context.Context, cause error) {
 
 	if err := r.db.SetRelayError(writeCtx, r.botID, msg); err != nil {
 		r.log.Warn("记录中继错误失败", "err", err)
+		return
 	}
+	r.publishStatus()
 }
 
 // clearRelayError 在一次成功中继后清掉错误标记。

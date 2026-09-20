@@ -159,6 +159,14 @@ func (r *Runtime) Start(ctx context.Context) error {
 	r.botTgID = me.ID
 	r.mu.Unlock()
 
+	// Long polling cannot receive updates while a previous webhook is active.
+	if err := r.api.DeleteWebhook(ctx); err != nil {
+		msg := "清除旧 webhook 失败：" + DescribeTelegramError(err)
+		_ = r.db.UpdateBotHealth(ctx, r.botID, domain.HealthError, &msg)
+		r.publishStatus()
+		return fmt.Errorf("机器人启动失败: %s", msg)
+	}
+
 	runCtx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
 
@@ -168,9 +176,6 @@ func (r *Runtime) Start(ctx context.Context) error {
 	r.running = true
 	r.mu.Unlock()
 
-	if err := r.db.UpdateBotHealth(ctx, r.botID, domain.HealthOnline, nil); err != nil {
-		r.log.Warn("更新健康状态失败", "err", err)
-	}
 	r.publishStatus()
 
 	r.log.Info("机器人已启动长轮询", "username", me.Username)
@@ -181,7 +186,7 @@ func (r *Runtime) Start(ctx context.Context) error {
 // Stop 停止长轮询并等待在途任务收尾。
 func (r *Runtime) Stop(ctx context.Context) {
 	r.mu.Lock()
-	if !r.running {
+	if r.cancel == nil {
 		r.mu.Unlock()
 		return
 	}
@@ -214,7 +219,12 @@ var allowedUpdates = []string{
 }
 
 func (r *Runtime) pollLoop(ctx context.Context, stopped chan<- struct{}) {
-	defer close(stopped)
+	defer func() {
+		r.mu.Lock()
+		r.running = false
+		close(stopped)
+		r.mu.Unlock()
+	}()
 
 	const (
 		pollTimeoutSec = 30
@@ -237,6 +247,7 @@ func (r *Runtime) pollLoop(ctx context.Context, stopped chan<- struct{}) {
 		pendingOffset int64
 		lastSave      = time.Now()
 		backoff       = time.Second
+		pollHealthy   bool
 	)
 
 	for {
@@ -251,14 +262,15 @@ func (r *Runtime) pollLoop(ctx context.Context, stopped chan<- struct{}) {
 				r.flushOffset(ctx, pendingOffset)
 				return
 			}
-			// 409 表示同一个 token 在别处也在轮询 —— 重试没用，
-			// 必须让管理员知道，而不是无限重连刷日志。
+			msg := DescribeTelegramError(err)
+			_ = r.db.UpdateBotHealth(context.WithoutCancel(ctx), r.botID, domain.HealthError, &msg)
+			r.publishStatus()
+			pollHealthy = false
+			// Invalid tokens and polling conflicts require administrator action.
 			var apiErr *tgapi.APIError
-			if errors.As(err, &apiErr) && apiErr.Code == 409 {
-				msg := "另一个进程正在用同一个 token 轮询（可能是重复启动，或 Telegram 侧 webhook 未清除）"
+			if errors.As(err, &apiErr) && (apiErr.Code == 401 || apiErr.Code == 409) {
 				r.log.Error(msg)
-				_ = r.db.UpdateBotHealth(context.WithoutCancel(ctx), r.botID, domain.HealthError, &msg)
-				r.publishStatus()
+				r.flushOffset(ctx, pendingOffset)
 				return
 			}
 
@@ -278,6 +290,11 @@ func (r *Runtime) pollLoop(ctx context.Context, stopped chan<- struct{}) {
 		}
 
 		backoff = time.Second
+		if !pollHealthy {
+			_ = r.db.UpdateBotHealth(ctx, r.botID, domain.HealthOnline, nil)
+			r.publishStatus()
+			pollHealthy = true
+		}
 
 		if len(updates) == 0 {
 			r.flushOffset(ctx, pendingOffset)
@@ -423,20 +440,31 @@ func (r *Runtime) handlePrivate(ctx context.Context, m *tgapi.Message) {
 
 // runSerial 让同一个用户的消息串行执行。
 //
-// 长轮询是**并发**处理更新的（这里用 goroutine 池），同一个用户连发的
-// 两条消息会同时跑完「建话题 → 复制消息」，先发的完全可能后落地，
-// 话题里的顺序就是乱的。人工客服场景里顺序即语义。
+// Accepted tasks own their timeout so returning from dispatch cannot cancel them.
+// Stop drains these tasks before closing the database.
 func (r *Runtime) runSerial(ctx context.Context, key int64, fn func(context.Context)) {
+	if ctx.Err() != nil {
+		return
+	}
+	r.queues.live.Add(1)
 	sem := r.queues.forKey(key)
-	sem <- struct{}{}
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		r.queues.live.Done()
+		return
+	}
 	go func() {
+		defer r.queues.live.Done()
 		defer func() { <-sem }()
+		taskCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 90*time.Second)
+		defer cancel()
 		defer func() {
 			if rec := recover(); rec != nil {
 				r.log.Error("中继任务 panic", "key", key, "panic", rec)
 			}
 		}()
-		fn(ctx)
+		fn(taskCtx)
 	}()
 }
 
@@ -505,6 +533,8 @@ func (r *Runtime) bufferAlbum(ctx context.Context, m *tgapi.Message) {
 	if !ok {
 		buf = &albumBuffer{chatID: m.Chat.ID, fromUserID: m.From.ID}
 		r.albums[m.MediaGroupID] = buf
+		// Keep drain waiting until the timer has handed the album to runSerial.
+		r.queues.live.Add(1)
 	}
 	buf.messages = append(buf.messages, m)
 
@@ -526,7 +556,11 @@ func (r *Runtime) flushAlbum(groupID string) {
 	}
 	r.albumMu.Unlock()
 
-	if !ok || len(buf.messages) == 0 {
+	if !ok {
+		return
+	}
+	defer r.queues.live.Done()
+	if len(buf.messages) == 0 {
 		return
 	}
 
