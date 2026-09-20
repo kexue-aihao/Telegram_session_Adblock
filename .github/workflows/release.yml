@@ -9,8 +9,7 @@ name: Release
 #   2. 为三个平台构建独立二进制（含前端产物），打包成 tar.gz / zip；
 #   3. 创建 GitHub Release 并附上这些产物。
 #
-# 前两件并行跑，Release 等二进制就绪后再创建 —— 否则会先出现一个
-# 空 Release，用户点进去什么都没有。
+# 前两件并行跑，Release 等镜像和二进制都就绪后再创建。
 
 on:
   push:
@@ -64,6 +63,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ steps.repo.outputs.name }}
           tags: |
+            type=ref,event=tag
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
@@ -131,6 +131,7 @@ jobs:
           for target in $targets; do
             GOOS="${target%%/*}"
             GOARCH="${target##*/}"
+            export GOOS GOARCH
 
             out="tgs-${GOOS}-${GOARCH}"
             # 用显式 if 而不是 `[ ... ] && out=...`：
@@ -193,7 +194,7 @@ jobs:
 
   # ── 发布 ────────────────────────────────────────────────────
   release:
-    needs: [binaries]
+    needs: [image, binaries]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
