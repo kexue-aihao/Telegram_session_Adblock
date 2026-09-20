@@ -48,10 +48,24 @@ const (
 )
 
 // 规则匹配方式
+//
+// 前三种都是「拿 pattern 去比对文本」。MatchCooccurrence 是唯一的例外：
+// 它**不看文本**，看的是同一条消息上**其他规则的命中数** —— pattern 写成
+// 一个十进制整数，表示「需要命中多少条不同的规则才触发」。
+//
+// 为什么需要它：单关键词规则永远滞后于对抗。黑话换个说法就绕过了，
+// 但「一条消息里同时谈论好几样犯罪工具」这个形态不会变。
+// 每个信号词单独出现都可能误伤（「钱包授权怎么取消」是受害者在求助），
+// 而一条消息里同时出现 3 个以上，几乎不可能是正常内容。
+//
+// 因此它配套的使用方式是：把拿不准的词写成 action=notify 的弱信号规则
+// （只告警不处罚），再用一条 cooccurrence 规则把多个弱信号聚合成重罚。
 const (
 	MatchRegex     = "regex"
 	MatchContains  = "contains"
 	MatchWholeWord = "whole_word"
+	// MatchCooccurrence 的 pattern 是十进制整数：触发所需的「不同规则命中数」下限。
+	MatchCooccurrence = "cooccurrence"
 )
 
 // 规则匹配目标 —— 决定拿消息的哪一部分去匹配。
@@ -289,14 +303,18 @@ type AdRule struct {
 
 // RuleHit 是一次规则命中 —— 广告审计的核心记录。
 //
-// 刻意把 RulePattern / RuleFlags 冗余存下来：规则可能事后被改甚至被删，
+// 刻意把 RulePattern / RuleFlags / RuleMatchMode 冗余存下来：规则可能事后被改甚至被删，
 // 但审计记录必须永远能还原「当时是按什么规则判定的」。
+//
+// RuleMatchMode 尤其不能省：共现模式的 pattern 是阈值整数而不是正则，
+// 没有它，审计面板只能把这条快照读成一条匹配字面量「3」的正则。
 type RuleHit struct {
 	ID                int64    `json:"id"`
 	RuleID            *int64   `json:"ruleId"`
 	RuleName          string   `json:"ruleName"`
 	RulePattern       string   `json:"rulePattern"`
 	RuleFlags         string   `json:"ruleFlags"`
+	RuleMatchMode     string   `json:"ruleMatchMode"`
 	BotID             int64    `json:"botId"`
 	BotName           string   `json:"botName"`
 	ContactID         int64    `json:"contactId"`

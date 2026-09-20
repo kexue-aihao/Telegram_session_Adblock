@@ -106,7 +106,7 @@ export interface AdRule {
   name: string;
   pattern: string;
   flags: string;
-  matchMode: 'regex' | 'contains' | 'whole_word';
+  matchMode: 'regex' | 'contains' | 'whole_word' | 'cooccurrence';
   target: 'text' | 'caption' | 'text_link' | 'url' | 'mention' | 'forward' | 'all';
   action: 'delete' | 'warn' | 'escalate' | 'notify';
   severity: number;
@@ -144,6 +144,9 @@ export interface RuleHit {
   ruleName: string;
   rulePattern: string;
   ruleFlags: string;
+  // 规则的匹配方式。共现模式的 pattern 是阈值整数而不是正则，
+  // 少了这个字段，面板只能把快照展示成一条匹配「3」的正则。
+  ruleMatchMode: string;
   botId: number;
   botName: string;
   contactId: number;

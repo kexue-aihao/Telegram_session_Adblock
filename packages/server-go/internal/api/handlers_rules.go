@@ -437,7 +437,8 @@ func buildRuleInput(req ruleRequest, existing *domain.AdRule) (store.RuleInput, 
 	if in.Flags == "" {
 		in.Flags = "iu"
 	}
-	if !validEnum(in.MatchMode, domain.MatchRegex, domain.MatchContains, domain.MatchWholeWord) {
+	if !validEnum(in.MatchMode, domain.MatchRegex, domain.MatchContains,
+		domain.MatchWholeWord, domain.MatchCooccurrence) {
 		return in, errText("匹配方式不合法：" + in.MatchMode)
 	}
 	if !validEnum(in.Target, domain.TargetText, domain.TargetCaption, domain.TargetTextLink,

@@ -54,6 +54,18 @@ function toggleExpanded(id: number) {
   expanded.value = next;
 }
 
+/**
+ * 规则快照怎么展示。
+ *
+ * 共现规则的 pattern 是阈值整数而不是正则，套上 `/…/flags` 会被读成
+ * 「匹配字面量 3 的正则」。只对共现改说法，其余保持原样 —— 老记录
+ * 没有这一列（回填的是 'regex'），展示与从前完全一致。
+ */
+const ruleSnapshot = (hit: RuleHit) =>
+  hit.ruleMatchMode === 'cooccurrence'
+    ? `同一条消息命中 ${hit.rulePattern} 条不同规则时触发`
+    : `/${hit.rulePattern}/${hit.ruleFlags}`;
+
 const stagger = (index: number) => ({
   animation: `hit-in var(--duration-layout) var(--ease-expo) ${Math.min(index, 12) * 30}ms both`,
 });
@@ -177,7 +189,7 @@ const totalLogs = computed(() => logs.data.value?.total ?? 0);
               <div class="grid grid-cols-[92px_1fr] gap-3">
                 <span class="text-2xs text-[var(--color-ink-subtle)]">规则快照</span>
                 <code class="min-w-0 font-mono text-xs break-all text-[var(--color-ink-muted)]">
-                  /{{ hit.rulePattern }}/{{ hit.ruleFlags }}
+                  {{ ruleSnapshot(hit) }}
                 </code>
               </div>
 

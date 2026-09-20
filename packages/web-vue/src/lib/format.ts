@@ -119,6 +119,8 @@ export const MATCH_MODE_LABELS: Record<string, string> = {
   regex: '正则表达式',
   contains: '包含文本',
   whole_word: '整词匹配',
+  // 模式和框里填的不是正则，而是一个整数阈值（需要命中多少条不同规则）。
+  cooccurrence: '多信号共现',
 };
 
 export const TARGET_LABELS: Record<string, string> = {

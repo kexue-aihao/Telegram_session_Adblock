@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +46,9 @@ type compiledRule struct {
 	row     ruleRow
 	re      *regexp.Regexp // 字面量模式（contains）为 nil
 	literal string         // contains 模式用，走 strings.Contains 更快
+	// cooccurrence 模式用：触发所需的「不同规则命中数」下限。
+	// 该模式不编译正则，pattern 存的就是这个整数。
+	threshold int
 }
 
 type ruleRow struct {
@@ -142,6 +146,17 @@ func compile(row ruleRow) (compiledRule, error) {
 		cr.literal = row.Pattern
 		return cr, nil
 
+	case domain.MatchCooccurrence:
+		// pattern 位置放的是阈值（一个十进制正整数），不是正则。
+		// 解析失败必须报错而不是回落到 0：阈值 0 会让这条规则**无条件命中**，
+		// 一条手滑写错的正则就变成了「拦截所有人全部消息」。
+		n, err := strconv.Atoi(strings.TrimSpace(row.Pattern))
+		if err != nil || n < 1 {
+			return cr, fmt.Errorf("共现阈值必须是正整数，实际是 %q", row.Pattern)
+		}
+		cr.threshold = n
+		return cr, nil
+
 	case domain.MatchWholeWord:
 		// RE2 不支持前后瞻，所以「词边界」不用 (?<![\w]) 表达，
 		// 而是在匹配之后手工检查边界（见 matchWholeWord）。
@@ -185,6 +200,15 @@ func CheckPattern(pattern, flags, matchMode string) error {
 	}
 
 	if matchMode == domain.MatchContains {
+		return nil
+	}
+	if matchMode == domain.MatchCooccurrence {
+		// 单独判一次是为了给出比 compile 更具体的错误说法：
+		// 管理员在「正则」框里填了 `\d{3}` 之类的写法时，得有人告诉他
+		// 这个模式要的是数字本身，不是匹配数字的正则。
+		if n, err := strconv.Atoi(strings.TrimSpace(pattern)); err != nil || n < 1 {
+			return fmt.Errorf("共现模式要在模式框里填一个正整数（触发所需的命中规则条数），例如 3；实际填的是 %q", pattern)
+		}
 		return nil
 	}
 	if _, err := compile(ruleRow{Pattern: pattern, Flags: flags, MatchMode: matchMode}); err != nil {
@@ -333,6 +357,12 @@ type MatchResult struct {
 // 这是中继链路与沙盒**共用**的唯一匹配入口。两条路径各写一份匹配逻辑
 // 迟早会漂移，而沙盒的全部意义就是「所见即运行时所得」。
 func Run(pattern, flags, matchMode, text string) (MatchResult, error) {
+	// 共现模式不看文本。没有这道拦截它会在沙盒里安静地返回「未命中」——
+	// 管理员会以为自己的阈值配错了，而实际上这个模式根本无法单条测试。
+	if matchMode == domain.MatchCooccurrence {
+		return MatchResult{}, errors.New("共现模式依赖同一条消息上的全部命中，无法在沙盒里单独测试；请保存后用真实消息验证")
+	}
+
 	if text == "" {
 		return MatchResult{}, nil
 	}
@@ -437,9 +467,18 @@ func (e *Engine) Evaluate(ctx context.Context, rc Context, rulesEnabled bool) ([
 	}
 
 	var hits []Hit
+	// 共现规则要等到其余规则全部跑完才知道命中了几条，因此单独攒起来，
+	// 第一遍结束后再判。它们自己不参与计数。
+	var cooccurrence []compiledRule
+
 	for _, cr := range all {
 		// 全局规则（BotID 为 nil）对所有机器人生效
 		if cr.row.BotID != nil && *cr.row.BotID != rc.BotID {
+			continue
+		}
+
+		if cr.row.MatchMode == domain.MatchCooccurrence {
+			cooccurrence = append(cooccurrence, cr)
 			continue
 		}
 
@@ -476,7 +515,55 @@ func (e *Engine) Evaluate(ctx context.Context, rc Context, rulesEnabled bool) ([
 		})
 	}
 
+	hits = append(hits, evalCooccurrence(cooccurrence, hits)...)
 	return hits, nil
+}
+
+// evalCooccurrence 判定共现规则。
+//
+// 计数口径是**命中了几条不同的规则**，不是命中了几次 —— 一条规则在一句话里
+// 出现三遍仍然是「一个信号」，把它算成三个会让阈值形同虚设。
+func evalCooccurrence(rules []compiledRule, hits []Hit) []Hit {
+	if len(rules) == 0 {
+		return nil
+	}
+
+	seen := make(map[int64]bool, len(hits))
+	names := make([]string, 0, len(hits))
+	for _, h := range hits {
+		// ID 为 0 的是没有落库的规则，不参与计数
+		if h.Rule.ID == 0 || seen[h.Rule.ID] {
+			continue
+		}
+		seen[h.Rule.ID] = true
+		names = append(names, h.Rule.Name)
+	}
+	distinct := len(seen)
+
+	var out []Hit
+	for _, cr := range rules {
+		if distinct < cr.threshold {
+			continue
+		}
+		out = append(out, Hit{
+			Rule:   cr.row.ToAdRule(),
+			Target: cr.row.Target,
+			// 这条命中的「证据」不是某段文本，而是凑够阈值的那个规则清单。
+			// 审计面板上要能一眼看出是哪几个信号叠出来的。
+			MatchedText:       truncateRunes(fmt.Sprintf("命中 %d 条规则：%s", distinct, strings.Join(names, "、")), 300),
+			NormalizedExcerpt: fmt.Sprintf("规则共现 %d/%d", distinct, cr.threshold),
+			Severity:          cr.row.Severity,
+		})
+	}
+	return out
+}
+
+func truncateRunes(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "…"
 }
 
 func runCompiled(cr compiledRule, text string) (MatchResult, error) {

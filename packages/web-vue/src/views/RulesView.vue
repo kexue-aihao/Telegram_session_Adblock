@@ -35,6 +35,18 @@ const grouped = computed(() => {
   };
 });
 
+/**
+ * 列表里怎么展示 pattern。
+ *
+ * 共现规则的 pattern 是阈值整数而不是正则，仍然套 `/3/` 那副壳子等于告诉
+ * 管理员「这是一条匹配字面量 3 的正则」。沙盒那边已经专门讲过它不匹配文本，
+ * 这里得是同一个说法。
+ */
+const patternDisplay = (rule: AdRule) =>
+  rule.matchMode === 'cooccurrence'
+    ? `同一条消息命中 ${rule.pattern} 条不同规则时触发`
+    : `/${rule.pattern}/${rule.flags}`;
+
 const stagger = (index: number) => ({
   animation: `row-in var(--duration-layout) var(--ease-expo) ${Math.min(index, 12) * 30}ms both`,
 });
@@ -149,7 +161,7 @@ function onSaved() {
                 <code
                   class="block truncate rounded-lg bg-[var(--color-bg-2)] px-2 py-1.5 font-mono text-xs text-[var(--color-ink-muted)]"
                 >
-                  /{{ rule.pattern }}/{{ rule.flags }}
+                  {{ patternDisplay(rule) }}
                 </code>
 
                 <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-[var(--color-ink-subtle)]">

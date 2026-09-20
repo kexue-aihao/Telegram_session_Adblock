@@ -130,6 +130,7 @@ type RecordRuleHitInput struct {
 	RuleName          string
 	RulePattern       string
 	RuleFlags         string
+	RuleMatchMode     string
 	BotID             int64
 	ContactID         int64
 	TopicID           *int64
@@ -142,7 +143,7 @@ type RecordRuleHitInput struct {
 
 // RecordRuleHit 写一条命中审计。
 //
-// rule_name / rule_pattern / rule_flags 是**快照**：规则随时可能被改
+// rule_name / rule_pattern / rule_flags / rule_match_mode 是**快照**：规则随时可能被改
 // 甚至被删，而审计记录必须永远能回答「当时是按什么判定的」。
 func (s *Store) RecordRuleHit(ctx context.Context, in RecordRuleHitInput) (int64, error) {
 	outcomes, err := json.Marshal(in.Outcomes)
@@ -150,12 +151,18 @@ func (s *Store) RecordRuleHit(ctx context.Context, in RecordRuleHitInput) (int64
 		return 0, err
 	}
 
+	// 老调用方可能不带这个字段。空串撞上 NOT NULL 会让整条审计写不进去 ——
+	// 审计写不进去等于「拦了但没记录」，比字段本身不准严重得多。
+	if in.RuleMatchMode == "" {
+		in.RuleMatchMode = domain.MatchRegex
+	}
+
 	res, err := s.write.ExecContext(ctx, `
-		INSERT INTO rule_hits (rule_id, rule_name, rule_pattern, rule_flags, bot_id,
+		INSERT INTO rule_hits (rule_id, rule_name, rule_pattern, rule_flags, rule_match_mode, bot_id,
 			contact_id, topic_id, message_id, matched_text, normalized_excerpt,
 			outcomes, severity, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		in.RuleID, in.RuleName, in.RulePattern, in.RuleFlags, in.BotID,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		in.RuleID, in.RuleName, in.RulePattern, in.RuleFlags, in.RuleMatchMode, in.BotID,
 		in.ContactID, in.TopicID, in.MessageID, in.MatchedText, in.NormalizedExcerpt,
 		string(outcomes), in.Severity, time.Now().UnixMilli())
 	if err != nil {
@@ -218,7 +225,7 @@ func (s *Store) ListRuleHits(ctx context.Context, q RuleHitQuery) (domain.Pagina
 	}
 
 	query := `
-		SELECT h.id, h.rule_id, h.rule_name, h.rule_pattern, h.rule_flags,
+		SELECT h.id, h.rule_id, h.rule_name, h.rule_pattern, h.rule_flags, h.rule_match_mode,
 		       h.bot_id, COALESCE(b.name, '（已删除）'),
 		       h.contact_id, COALESCE(c.first_name, ''), c.last_name, c.username, COALESCE(c.tg_user_id, 0),
 		       h.topic_id, t.message_thread_id,
@@ -244,7 +251,7 @@ func (s *Store) ListRuleHits(ctx context.Context, q RuleHitQuery) (domain.Pagina
 		var outcomesJSON string
 
 		if err := rows.Scan(
-			&h.ID, &h.RuleID, &h.RuleName, &h.RulePattern, &h.RuleFlags,
+			&h.ID, &h.RuleID, &h.RuleName, &h.RulePattern, &h.RuleFlags, &h.RuleMatchMode,
 			&h.BotID, &h.BotName,
 			&h.ContactID, &firstName, &lastName, &username, &h.TgUserID,
 			&h.TopicID, &h.ThreadID,

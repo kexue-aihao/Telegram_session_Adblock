@@ -36,6 +36,13 @@ const result = ref<RuleTestResult | null>(null);
 const error = ref<string | null>(null);
 const running = ref(false);
 
+/**
+ * 共现模式不匹配文本，它数的是同一条消息上命中了几条别的规则。
+ * 这个模式的输入框里填的是一个整数阈值，不是正则 —— 如果仍然摆出
+ * `/ … /flags` 那套装饰，管理员会照着正则的直觉往里写 \d{3}。
+ */
+const isCooccurrence = computed(() => props.matchMode === 'cooccurrence');
+
 let debounceTimer: number | null = null;
 let generation = 0;
 
@@ -45,6 +52,14 @@ function schedule() {
 }
 
 async function run() {
+  // 共现模式没有可匹配的文本，打过去必然返回错误。与其让管理员看到
+  // 一个红框（还得猜是不是自己配错了），不如直接说明它测不了。
+  if (isCooccurrence.value) {
+    result.value = null;
+    error.value = null;
+    return;
+  }
+
   if (!props.pattern) {
     result.value = null;
     error.value = null;
@@ -108,19 +123,22 @@ const hasError = computed(() => error.value !== null || result.value?.timedOut =
     <div class="flex gap-2">
       <div class="relative flex-1">
         <span
+          v-if="!isCooccurrence"
           class="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 font-mono text-xs text-[var(--color-ink-faint)]"
         >
           /
         </span>
         <AppInput
           :model-value="props.pattern"
-          placeholder="加\s*(微信|vx|QQ)"
+          :placeholder="isCooccurrence ? '3' : '加\\s*(微信|vx|QQ)'"
           spellcheck="false"
-          class="pr-10 pl-5 font-mono text-xs"
+          class="font-mono text-xs"
+          :class="isCooccurrence ? 'px-2.5' : 'pr-10 pl-5'"
           :invalid="hasError"
           @update:model-value="emit('update:pattern', $event)"
         />
         <span
+          v-if="!isCooccurrence"
           class="pointer-events-none absolute top-1/2 right-2.5 -translate-y-1/2 font-mono text-xs text-[var(--color-ink-faint)]"
         >
           /{{ props.flags }}
@@ -128,6 +146,7 @@ const hasError = computed(() => error.value !== null || result.value?.timedOut =
       </div>
 
       <AppInput
+        v-if="!isCooccurrence"
         :model-value="props.flags"
         class="w-20 text-center font-mono text-xs"
         spellcheck="false"
@@ -136,6 +155,15 @@ const hasError = computed(() => error.value !== null || result.value?.timedOut =
         @update:model-value="emit('update:flags', $event.replace(/[^gimsuy]/g, ''))"
       />
     </div>
+
+    <!-- 共现模式的输入不是正则，说明白它要的是什么，否则过滤器只会失效 -->
+    <p
+      v-if="isCooccurrence"
+      class="rounded-lg bg-[var(--color-surface-2)] px-2.5 py-2 text-2xs leading-relaxed text-[var(--color-ink-muted)]"
+    >
+      多信号共现不匹配文本。框里填一个整数：同一条消息命中<strong>多少条不同规则</strong>时触发这条规则。
+      它无法在沙盒里单独测试，保存后用真实消息验证。
+    </p>
 
     <Transition name="err">
       <p
@@ -147,7 +175,7 @@ const hasError = computed(() => error.value !== null || result.value?.timedOut =
       </p>
     </Transition>
 
-    <div class="space-y-1.5">
+    <div v-if="!isCooccurrence" class="space-y-1.5">
       <label class="text-2xs font-medium text-[var(--color-ink-muted)]">样本文本</label>
       <AppTextarea
         v-model="sample"

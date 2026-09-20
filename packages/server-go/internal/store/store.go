@@ -214,6 +214,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"bots", "is_manager", "INTEGER NOT NULL DEFAULT 0"},
 		{"bots", "last_relay_error", "TEXT"},
 		{"bots", "last_relay_error_at", "INTEGER"},
+		// 系统规则同步用。老库升级上来时是 NULL，syncSystemRules 把
+		// 「NULL」当作「从未同步过」，因此这些行会被代码接管一次。
+		{"ad_rules", "system_fingerprint", "TEXT"},
+		// 命中审计的规则快照补上匹配方式（见 schema.sql）。老记录回填成
+		// 'regex' —— 那正是它们此前的展示方式，行为不变。
+		{"rule_hits", "rule_match_mode", "TEXT NOT NULL DEFAULT 'regex'"},
 	}
 	for _, col := range incremental {
 		if err := s.addColumnIfMissing(ctx, col.table, col.column, col.definition); err != nil {

@@ -171,7 +171,10 @@ CREATE TABLE IF NOT EXISTS ad_rules (
     auto_disabled_at     INTEGER,
     auto_disabled_reason TEXT,
     created_at           INTEGER NOT NULL,
-    updated_at           INTEGER NOT NULL
+    updated_at           INTEGER NOT NULL,
+    -- 上一次由代码写入的「受管字段」指纹（见 defaults.go 的 syncSystemRules）。
+    -- NULL 表示这一行从未被同步过（老库升级上来的）。
+    system_fingerprint   TEXT
 );
 CREATE INDEX IF NOT EXISTS ad_rules_enabled_priority_idx ON ad_rules (is_enabled, priority);
 
@@ -182,6 +185,9 @@ CREATE TABLE IF NOT EXISTS rule_hits (
     rule_name          TEXT    NOT NULL,
     rule_pattern       TEXT    NOT NULL,
     rule_flags         TEXT    NOT NULL,
+    -- 匹配方式也要进快照。共现模式的 pattern 存的是阈值整数而不是正则，
+    -- 少了这一列，审计面板只能把它当成一条匹配「3」的正则来展示。
+    rule_match_mode    TEXT    NOT NULL DEFAULT 'regex',
     bot_id             INTEGER NOT NULL REFERENCES bots (id) ON DELETE CASCADE,
     contact_id         INTEGER NOT NULL REFERENCES contacts (id) ON DELETE CASCADE,
     topic_id           INTEGER REFERENCES topics (id) ON DELETE SET NULL,
